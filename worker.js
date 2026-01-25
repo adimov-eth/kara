@@ -972,8 +972,14 @@ const USER_HTML = `<!DOCTYPE html>
               showValidation('valid', validatedTitle);
               resolve(true);
             },
-            onError: () => {
-              showValidation('invalid', 'Video not found or unavailable');
+            onError: (e) => {
+              // Error codes: 2=invalid ID, 5=not found, 100=private/removed, 101/150=embedding disabled
+              const code = e.data;
+              if (code === 101 || code === 150) {
+                showValidation('invalid', 'Video has embedding disabled');
+              } else {
+                showValidation('invalid', 'Video not found or unavailable');
+              }
               resolve(false);
             }
           }

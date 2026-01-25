@@ -6,6 +6,9 @@ compatibility_date = "2024-01-01"
 binding = "KARAOKE_KV"
 id = "31425b61dea34153afd11f446c29b456"
 
-[[migrations]]
-tag = "v2"
-deleted_classes = ["KaraokeQueue"]
+# Staging environment
+[env.staging]
+name = "karaoke-queue-staging"
+[[env.staging.kv_namespaces]]
+binding = "KARAOKE_KV"
+id = "7b619514e9534f359baf618ee4574d88"
