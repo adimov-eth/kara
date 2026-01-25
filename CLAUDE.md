@@ -4,97 +4,89 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A real-time karaoke queue manager with YouTube integration, built as a Cloudflare Worker with KV storage. Users can add songs from YouTube, vote on queue order, and a display view auto-plays videos.
+A real-time karaoke queue manager with YouTube integration, built as a Cloudflare Worker with KV storage. Users add songs via YouTube URL, vote on queue order, and a display view auto-plays videos.
+
+**Live**: https://karaoke-queue.boris-47d.workers.dev
 
 ## Commands
 
 ```bash
-# Deploy to Cloudflare Workers
-wrangler deploy
-
-# Local development (requires wrangler login first)
-wrangler dev
+wrangler deploy    # Deploy to Cloudflare Workers
+wrangler dev       # Local development
 ```
 
 ## Architecture
 
-**Single-file architecture**: Everything is in `worker.js` (~2170 lines):
-- API handlers (lines 8-300): State management and business logic
-- Main fetch handler (lines 302-432): Routes requests to API or views
-- `USER_HTML` (lines 434-1278): User view for joining queue and voting
-- `PLAYER_HTML` (lines 1279-1634): Display view with YouTube player
-- `ADMIN_HTML` (lines 1635-2168): Admin control panel
+**Single-file**: Everything in `worker.js` (~2170 lines)
 
-**Three Views**:
-1. `/` - User view: Add songs, vote, see queue
-2. `/player` - Display view: YouTube player with auto-advance
-3. `/shikashika` - Admin view: Queue management, skip, reorder
+| Section | Lines | Description |
+|---------|-------|-------------|
+| API handlers | 8-300 | State management, all `/api/*` endpoints |
+| Fetch router | 302-432 | Routes requests to API or HTML views |
+| `USER_HTML` | 434-1278 | User view: join queue, vote, see status |
+| `PLAYER_HTML` | 1279-1634 | Display view: YouTube player, auto-advance |
+| `ADMIN_HTML` | 1635-2168 | Admin: skip, reorder, remove, add entries |
 
-**Request flow**:
-1. Requests to `/api/*` are handled by API functions
-2. View routes serve inline HTML
-3. All views poll `/api/state` for updates (2-3 seconds)
+## Views
+
+| Path | Purpose |
+|------|---------|
+| `/` | Users add songs (name + YouTube URL), vote, remove own entry |
+| `/player` | Big screen display, auto-plays queue, shows "up next" |
+| `/shikashika` | Admin controls: skip, add, reorder, remove |
 
 ## Data Model
 
 ```typescript
 Entry {
-  id: string           // Unique identifier
+  id: string           // Unique ID
   name: string         // Singer name (max 30 chars)
   youtubeUrl: string   // YouTube video URL
   youtubeTitle: string // Video title (max 100 chars)
-  votes: number        // Net votes (can be negative)
-  epoch: number        // Priority tier (lower plays first)
-  joinedAt: timestamp  // For tiebreaking
+  votes: number        // Net votes (can go negative)
+  epoch: number        // Priority tier (lower = plays first)
+  joinedAt: timestamp  // Tiebreaker within same epoch/votes
 }
 
 State {
-  queue: Entry[]       // Sorted by epoch ASC, votes DESC, joinedAt ASC
+  queue: Entry[]       // Sorted: epoch ASC, votes DESC, joinedAt ASC
   currentEpoch: number // Increments when song completes
   nowPlaying: Entry | null
 }
 ```
 
-## Epoch System (Fair Queue Priority)
+## Epoch System (Fair Queue)
 
-- New entries get `epoch = currentEpoch`
-- When a song finishes: `currentEpoch++`
-- Queue sorts by: `epoch ASC, votes DESC, joinedAt ASC`
-- This ensures: if you sing while others are waiting, those others play before your next song regardless of votes
+Prevents queue-hogging: people who wait get priority over repeat singers.
+
+1. New entries get `epoch = currentEpoch`
+2. When song finishes: `currentEpoch++`
+3. Sort: epoch ASC, then votes DESC, then joinedAt ASC
+
+Example: A sings while B waits. A rejoins. B plays next regardless of A's votes (B has lower epoch).
 
 ## API Endpoints
 
-| Method | Endpoint | Headers | Body | Description |
-|--------|----------|---------|------|-------------|
-| GET | `/api/state` | - | - | Returns full state: `{ queue, nowPlaying, currentEpoch }` |
+| Method | Endpoint | Auth | Body | Description |
+|--------|----------|------|------|-------------|
+| GET | `/api/state` | - | - | Full state |
 | POST | `/api/join` | - | `{ name, youtubeUrl, youtubeTitle }` | Add to queue |
-| POST | `/api/vote` | `X-Voter-Id` | `{ entryId, direction: 1/-1/0 }` | Vote on entry |
+| POST | `/api/vote` | `X-Voter-Id` | `{ entryId, direction: 1/-1/0 }` | Vote |
 | POST | `/api/remove` | `X-Admin` or `X-User-Name` | `{ entryId }` | Remove entry |
-| POST | `/api/skip` | `X-Admin` or `X-User-Name` | - | Skip current song |
-| POST | `/api/next` | - | `{ currentId }` | Advance to next song (called by player, idempotent) |
-| POST | `/api/reorder` | `X-Admin` | `{ entryId, newEpoch?, newPosition? }` | Admin reorder |
-| POST | `/api/add` | `X-Admin` | `{ name, youtubeUrl, youtubeTitle }` | Admin add (plays next) |
+| POST | `/api/skip` | `X-Admin` or `X-User-Name` | - | Skip current |
+| POST | `/api/next` | - | `{ currentId }` | Advance queue (idempotent) |
+| POST | `/api/reorder` | `X-Admin` | `{ entryId, newPosition }` | Reorder |
+| POST | `/api/add` | `X-Admin` | `{ name, youtubeUrl, youtubeTitle }` | Add to front |
 
-## Client-Side Features
+## Key Features
 
-**YouTube URL Validation** (User View):
-- Uses YouTube IFrame API to check video duration
-- Rejects videos >7 minutes or livestreams
-- Extracts video title automatically
-
-**Auto-Advance** (Player View):
-- YouTube player detects video end (`onStateChange`)
-- Calls `/api/next` to advance queue
-- Auto-loads next video
-
-**Voting**:
-- One vote per voter per entry (tracked by UUID in localStorage)
-- Can toggle vote off or change direction
-- Cannot vote on own entry
+- **YouTube validation**: Client-side duration check (<7 min), rejects livestreams/playlists
+- **Auto-advance**: Player calls `/api/next` on video end, with idempotency (prevents double-skip from multiple tabs)
+- **Self-service**: Users can skip own song or remove from queue
+- **Voting**: One vote per voter per entry, stored in localStorage UUID
 
 ## Configuration
 
-- **wrangler.toml**: Configures KV namespace binding (`KARAOKE_KV`)
-- **CSS variables**: Colors and theming in each HTML view
-- **MAX_DURATION**: 420 seconds (7 minutes) in user view
-- **Polling intervals**: 3000ms (user), 2000ms (player/admin)
+- `wrangler.toml`: KV namespace binding (`KARAOKE_KV`)
+- `MAX_DURATION`: 420 seconds (7 min) — user view validation
+- Polling: 3s (user), 2s (player/admin)
