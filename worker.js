@@ -46,9 +46,12 @@ function extractYoutubeId(url) {
 
   const patterns = [
     /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([a-zA-Z0-9_-]{11})/,
+    /youtube\.com\/watch\?.*&v=([a-zA-Z0-9_-]{11})/,
     /youtube\.com\/shorts\/([a-zA-Z0-9_-]{11})/,
     /music\.youtube\.com\/watch\?v=([a-zA-Z0-9_-]{11})/,
+    /music\.youtube\.com\/watch\?.*&v=([a-zA-Z0-9_-]{11})/,
     /m\.youtube\.com\/watch\?v=([a-zA-Z0-9_-]{11})/,
+    /m\.youtube\.com\/watch\?.*&v=([a-zA-Z0-9_-]{11})/,
     /youtube\.com\/v\/([a-zA-Z0-9_-]{11})/
   ];
   for (const pattern of patterns) {
@@ -887,9 +890,12 @@ const USER_HTML = `<!DOCTYPE html>
 
       const patterns = [
         /(?:youtube\\.com\\/watch\\?v=|youtu\\.be\\/|youtube\\.com\\/embed\\/)([a-zA-Z0-9_-]{11})/,
+        /youtube\\.com\\/watch\\?.*&v=([a-zA-Z0-9_-]{11})/,
         /youtube\\.com\\/shorts\\/([a-zA-Z0-9_-]{11})/,
         /music\\.youtube\\.com\\/watch\\?v=([a-zA-Z0-9_-]{11})/,
+        /music\\.youtube\\.com\\/watch\\?.*&v=([a-zA-Z0-9_-]{11})/,
         /m\\.youtube\\.com\\/watch\\?v=([a-zA-Z0-9_-]{11})/,
+        /m\\.youtube\\.com\\/watch\\?.*&v=([a-zA-Z0-9_-]{11})/,
         /youtube\\.com\\/v\\/([a-zA-Z0-9_-]{11})/
       ];
       for (const pattern of patterns) {
@@ -901,8 +907,8 @@ const USER_HTML = `<!DOCTYPE html>
 
     // Validate YouTube URL
     async function validateUrl(url) {
-      // Check for playlist URLs
-      if (url.includes('list=') && !url.includes('watch?v=')) {
+      // Check for playlist-only URLs (no video ID present)
+      if (url.includes('list=') && !url.includes('v=') && !url.includes('youtu.be/')) {
         showValidation('invalid', 'Playlists not supported - paste a single video');
         return false;
       }
@@ -1457,9 +1463,12 @@ const PLAYER_HTML = `<!DOCTYPE html>
 
       const patterns = [
         /(?:youtube\\.com\\/watch\\?v=|youtu\\.be\\/|youtube\\.com\\/embed\\/)([a-zA-Z0-9_-]{11})/,
+        /youtube\\.com\\/watch\\?.*&v=([a-zA-Z0-9_-]{11})/,
         /youtube\\.com\\/shorts\\/([a-zA-Z0-9_-]{11})/,
         /music\\.youtube\\.com\\/watch\\?v=([a-zA-Z0-9_-]{11})/,
+        /music\\.youtube\\.com\\/watch\\?.*&v=([a-zA-Z0-9_-]{11})/,
         /m\\.youtube\\.com\\/watch\\?v=([a-zA-Z0-9_-]{11})/,
+        /m\\.youtube\\.com\\/watch\\?.*&v=([a-zA-Z0-9_-]{11})/,
         /youtube\\.com\\/v\\/([a-zA-Z0-9_-]{11})/
       ];
       for (const pattern of patterns) {
