@@ -26,7 +26,7 @@ async function updateUI(): Promise<void> {
   if (stored.queueState?.nowPlaying) {
     nowPlayingCard.style.display = 'block'
     emptyCard.style.display = 'none'
-    nowPlayingTitle.textContent = stored.queueState.nowPlaying.youtubeTitle
+    nowPlayingTitle.textContent = stored.queueState.nowPlaying.title
     nowPlayingSinger.textContent = stored.queueState.nowPlaying.name
   } else {
     nowPlayingCard.style.display = 'none'

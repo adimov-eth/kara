@@ -1,30 +1,11 @@
-import type { LegacyQueueState } from '@karaoke/types'
+import type { QueueState } from '@karaoke/types'
 import type { BackgroundToContent, ContentToBackground } from './types.js'
 
 let currentVideoId: string | null = null
 let video: HTMLVideoElement | null = null
-let queueState: LegacyQueueState | null = null
+let queueState: QueueState | null = null
 let endCheckInterval: number | null = null
 let hasReportedEnd = false
-
-function extractVideoId(url: string | null | undefined): string | null {
-  if (!url) return null
-  const normalizedUrl = url.trim()
-
-  const patterns = [
-    /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([a-zA-Z0-9_-]{11})/,
-    /youtube\.com\/watch\?.*&v=([a-zA-Z0-9_-]{11})/,
-    /youtube\.com\/shorts\/([a-zA-Z0-9_-]{11})/,
-    /music\.youtube\.com\/watch\?v=([a-zA-Z0-9_-]{11})/,
-  ]
-
-  for (const pattern of patterns) {
-    const match = normalizedUrl.match(pattern)
-    if (match?.[1]) return match[1]
-  }
-
-  return null
-}
 
 function getVideoIdFromUrl(): string | null {
   try {
@@ -130,14 +111,14 @@ function handleVideoEnd(): void {
 function getNextFromQueue(): string | null {
   if (!queueState || queueState.queue.length === 0) return null
   const next = queueState.queue[0]
-  return next ? extractVideoId(next.youtubeUrl) : null
+  return next?.videoId ?? null
 }
 
 function verifyCurrentVideo(): void {
   // Server sent new state - verify we're playing the right video
   if (!queueState?.nowPlaying) return
 
-  const expectedVideoId = extractVideoId(queueState.nowPlaying.youtubeUrl)
+  const expectedVideoId = queueState.nowPlaying.videoId
   const actualVideoId = getVideoIdFromUrl()
 
   if (expectedVideoId && expectedVideoId !== actualVideoId) {

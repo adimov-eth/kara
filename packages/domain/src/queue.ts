@@ -1,4 +1,4 @@
-import type { Entry, LegacyEntry, LegacyQueueState, VoteRecord } from '@karaoke/types'
+import type { Entry, QueueState, VoteRecord } from '@karaoke/types'
 
 /**
  * Sort queue by epoch ASC, votes DESC, joinedAt ASC
@@ -51,34 +51,11 @@ export function createEntry(params: {
 }
 
 /**
- * Create a legacy entry (for backward compatibility with existing API)
- * Pure function - id and timestamp are injected
- */
-export function createLegacyEntry(params: {
-  id: string
-  name: string
-  youtubeUrl: string
-  youtubeTitle: string
-  currentEpoch: number
-  timestamp: number
-}): LegacyEntry {
-  return {
-    id: params.id,
-    name: params.name.trim().substring(0, 30),
-    youtubeUrl: params.youtubeUrl.trim(),
-    youtubeTitle: (params.youtubeTitle || 'Unknown Song').substring(0, 100),
-    votes: 0,
-    epoch: params.currentEpoch,
-    joinedAt: params.timestamp,
-  }
-}
-
-/**
  * Check if a user can join the queue
  * Returns error message or null if allowed
  */
 export function canJoinQueue(
-  state: LegacyQueueState,
+  state: QueueState,
   name: string
 ): string | null {
   const trimmedName = name.trim().toLowerCase()
@@ -104,11 +81,11 @@ export function canJoinQueue(
  * Pure function - returns new state
  */
 export function applyVote(
-  entry: LegacyEntry,
+  entry: Entry,
   votes: VoteRecord,
   voterId: string,
   direction: 1 | -1 | 0
-): { entry: LegacyEntry; votes: VoteRecord } {
+): { entry: Entry; votes: VoteRecord } {
   const entryVotes = votes[entry.id] ?? {}
   const previousVote = entryVotes[voterId] ?? 0
 
@@ -116,7 +93,7 @@ export function applyVote(
   const newVoteTotal = entry.votes - previousVote + (direction === 0 ? 0 : direction)
 
   // Create new entry with updated votes
-  const newEntry: LegacyEntry = {
+  const newEntry: Entry = {
     ...entry,
     votes: newVoteTotal,
   }
@@ -141,9 +118,9 @@ export function applyVote(
  * Advance the queue to the next song
  * Pure function - returns new state
  */
-export function advanceQueue(state: LegacyQueueState): {
-  state: LegacyQueueState
-  completed: LegacyEntry | null
+export function advanceQueue(state: QueueState): {
+  state: QueueState
+  completed: Entry | null
 } {
   const completed = state.nowPlaying
   const newQueue = [...state.queue]
@@ -164,9 +141,9 @@ export function advanceQueue(state: LegacyQueueState): {
  * Pure function - returns new state or null if entry not found
  */
 export function removeFromQueue(
-  state: LegacyQueueState,
+  state: QueueState,
   entryId: string
-): LegacyQueueState | null {
+): QueueState | null {
   const entryIndex = state.queue.findIndex((e) => e.id === entryId)
   if (entryIndex === -1) return null
 
@@ -183,7 +160,7 @@ export function removeFromQueue(
  * Check if user is authorized to remove an entry
  */
 export function canRemoveEntry(
-  entry: LegacyEntry,
+  entry: Entry,
   isAdmin: boolean,
   userName: string | null
 ): boolean {
@@ -196,7 +173,7 @@ export function canRemoveEntry(
  * Check if user is authorized to skip the current song
  */
 export function canSkipCurrent(
-  nowPlaying: LegacyEntry | null,
+  nowPlaying: Entry | null,
   isAdmin: boolean,
   userName: string | null
 ): boolean {

@@ -1,5 +1,5 @@
 import type { Env } from './env.js'
-import { USER_HTML, PLAYER_HTML, ADMIN_HTML } from './views/index.js'
+import { GUEST_HTML, PLAYER_HTML, ADMIN_HTML } from './views/generated/index.js'
 
 // Re-export RoomDO for Cloudflare to find it
 export { RoomDO } from './room.js'
@@ -100,8 +100,8 @@ export default {
       })
     }
 
-    // Default: user view
-    return new Response(USER_HTML, {
+    // Default: guest view
+    return new Response(GUEST_HTML, {
       headers: { 'Content-Type': 'text/html; charset=utf-8' },
     })
   },

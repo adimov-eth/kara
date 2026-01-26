@@ -10,7 +10,14 @@ export interface Entry {
   joinedAt: number
 }
 
-// Legacy entry format (for migration compatibility)
+// Queue state
+export interface QueueState {
+  queue: Entry[]
+  currentEpoch: number
+  nowPlaying: Entry | null
+}
+
+// Legacy types (kept for storage migration in worker)
 export interface LegacyEntry {
   id: string
   name: string
@@ -21,14 +28,6 @@ export interface LegacyEntry {
   joinedAt: number
 }
 
-// Queue state
-export interface QueueState {
-  queue: Entry[]
-  currentEpoch: number
-  nowPlaying: Entry | null
-}
-
-// Legacy queue state (for migration compatibility)
 export interface LegacyQueueState {
   queue: LegacyEntry[]
   currentEpoch: number
@@ -93,18 +92,18 @@ export interface SearchResult {
 
 // Extension WebSocket protocol
 export type ExtensionMessage =
-  | { type: 'connected'; roomId: string }
-  | { type: 'search'; query: string; requestId: string }
-  | { type: 'search_result'; results: SearchResult[]; requestId: string }
-  | { type: 'play'; videoId: string }
-  | { type: 'ended'; videoId: string }
-  | { type: 'error'; videoId: string; reason: string }
+  | { kind: 'connected'; roomId: string }
+  | { kind: 'search'; query: string; requestId: string }
+  | { kind: 'search_result'; results: SearchResult[]; requestId: string }
+  | { kind: 'play'; videoId: string }
+  | { kind: 'ended'; videoId: string }
+  | { kind: 'error'; videoId: string; reason: string }
 
 // API request/response types
 export interface JoinRequest {
   name: string
-  youtubeUrl: string
-  youtubeTitle: string
+  videoId: string
+  title: string
 }
 
 export interface JoinResponse {
@@ -148,8 +147,8 @@ export interface ReorderRequest {
 
 export interface AdminAddRequest {
   name: string
-  youtubeUrl: string
-  youtubeTitle: string
+  videoId: string
+  title: string
 }
 
 // =============================================================================
@@ -161,26 +160,26 @@ export type ClientType = 'user' | 'player' | 'admin' | 'extension'
 
 // Server -> Client messages
 export type ServerMessage =
-  | { type: 'state'; state: LegacyQueueState; extensionConnected?: boolean }
-  | { type: 'error'; message: string }
-  | { type: 'joined'; entry: LegacyEntry; position: number }
-  | { type: 'removed'; entryId: string }
-  | { type: 'voted'; entryId: string; votes: number }
-  | { type: 'skipped'; nowPlaying: LegacyEntry | null }
-  | { type: 'advanced'; nowPlaying: LegacyEntry | null; currentEpoch: number }
-  | { type: 'extensionStatus'; connected: boolean }
-  | { type: 'pong' }
+  | { kind: 'state'; state: QueueState; extensionConnected?: boolean }
+  | { kind: 'error'; message: string }
+  | { kind: 'joined'; entry: Entry; position: number }
+  | { kind: 'removed'; entryId: string }
+  | { kind: 'voted'; entryId: string; votes: number }
+  | { kind: 'skipped'; nowPlaying: Entry | null }
+  | { kind: 'advanced'; nowPlaying: Entry | null; currentEpoch: number }
+  | { kind: 'extensionStatus'; connected: boolean }
+  | { kind: 'pong' }
 
 // Client -> Server messages
 export type ClientMessage =
-  | { type: 'subscribe'; clientType: ClientType }
-  | { type: 'join'; name: string; youtubeUrl: string; youtubeTitle: string }
-  | { type: 'vote'; entryId: string; direction: 1 | -1 | 0; voterId: string }
-  | { type: 'remove'; entryId: string; userName?: string; isAdmin?: boolean }
-  | { type: 'skip'; userName?: string; isAdmin?: boolean }
-  | { type: 'next'; currentId?: string | null }
-  | { type: 'reorder'; entryId: string; newPosition?: number; newEpoch?: number }
-  | { type: 'adminAdd'; name: string; youtubeUrl: string; youtubeTitle: string }
-  | { type: 'ping' }
-  | { type: 'ended'; videoId: string } // Extension reports video end
-  | { type: 'error'; videoId: string; reason: string } // Extension reports video error
+  | { kind: 'subscribe'; clientType: ClientType }
+  | { kind: 'join'; name: string; videoId: string; title: string }
+  | { kind: 'vote'; entryId: string; direction: 1 | -1 | 0; voterId: string }
+  | { kind: 'remove'; entryId: string; userName?: string; isAdmin?: boolean }
+  | { kind: 'skip'; userName?: string; isAdmin?: boolean }
+  | { kind: 'next'; currentId?: string | null }
+  | { kind: 'reorder'; entryId: string; newPosition?: number; newEpoch?: number }
+  | { kind: 'adminAdd'; name: string; videoId: string; title: string }
+  | { kind: 'ping' }
+  | { kind: 'ended'; videoId: string } // Extension reports video end
+  | { kind: 'error'; videoId: string; reason: string } // Extension reports video error

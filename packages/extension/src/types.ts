@@ -1,22 +1,22 @@
-import type { LegacyQueueState } from '@karaoke/types'
+import type { QueueState } from '@karaoke/types'
 
 // Extension → Server (via background WebSocket)
 export type ExtensionToServer =
-  | { type: 'subscribe'; clientType: 'extension' }
-  | { type: 'ended'; videoId: string }
-  | { type: 'error'; videoId: string; reason: string }
-  | { type: 'ping' }
+  | { kind: 'subscribe'; clientType: 'extension' }
+  | { kind: 'ended'; videoId: string }
+  | { kind: 'error'; videoId: string; reason: string }
+  | { kind: 'ping' }
 
 // Server → Extension
 export type ServerToExtension =
-  | { type: 'state'; state: LegacyQueueState }
-  | { type: 'play'; videoId: string }
-  | { type: 'pong' }
+  | { kind: 'state'; state: QueueState }
+  | { kind: 'play'; videoId: string }
+  | { kind: 'pong' }
 
 // Background ↔ Content Script
 export type BackgroundToContent =
   | { type: 'play'; videoId: string }
-  | { type: 'state'; state: LegacyQueueState }
+  | { type: 'state'; state: QueueState }
 
 export type ContentToBackground =
   | { type: 'videoEnded'; videoId: string }
@@ -27,5 +27,5 @@ export type ContentToBackground =
 export interface StoredState {
   connected: boolean
   lastVideoId: string | null
-  queueState: LegacyQueueState | null
+  queueState: QueueState | null
 }

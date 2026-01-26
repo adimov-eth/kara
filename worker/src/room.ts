@@ -1,5 +1,8 @@
 import type {
+  QueueState,
+  Entry,
   LegacyQueueState,
+  LegacyEntry,
   VoteRecord,
   ServerMessage,
   ClientMessage,
@@ -9,7 +12,7 @@ import type {
 } from '@karaoke/types'
 import {
   sortQueue,
-  createLegacyEntry,
+  createEntry,
   canJoinQueue,
   applyVote,
   advanceQueue,
@@ -38,7 +41,7 @@ const PERFORMANCES_KEY = 'performances'
 
 export class RoomDO implements DurableObject {
   private state: DurableObjectState
-  private queueState: LegacyQueueState | null = null
+  private queueState: QueueState | null = null
   private votes: VoteRecord | null = null
   private performances: Performance[] | null = null
   // Track extension WebSockets separately (tags can't be updated after acceptWebSocket)
@@ -50,15 +53,42 @@ export class RoomDO implements DurableObject {
     // via state.getWebSockets() - no explicit initialization needed
   }
 
-  private async getQueueState(): Promise<LegacyQueueState> {
+  private async getQueueState(): Promise<QueueState> {
     if (!this.queueState) {
-      const stored = await this.state.storage.get<LegacyQueueState>(STATE_KEY)
-      this.queueState = stored ?? { queue: [], currentEpoch: 0, nowPlaying: null }
+      const stored = await this.state.storage.get<QueueState | LegacyQueueState>(STATE_KEY)
+      this.queueState = stored ? this.migrateState(stored) : { queue: [], currentEpoch: 0, nowPlaying: null }
     }
     return this.queueState
   }
 
-  private async saveQueueState(state: LegacyQueueState): Promise<void> {
+  private migrateState(stored: QueueState | LegacyQueueState): QueueState {
+    // Detect legacy format by checking first entry or nowPlaying
+    const firstEntry = stored.queue[0] ?? stored.nowPlaying
+    const needsMigration = firstEntry && 'youtubeUrl' in firstEntry
+    if (!needsMigration) return stored as QueueState
+
+    const legacy = stored as LegacyQueueState
+    return {
+      queue: legacy.queue.map((e) => this.migrateEntry(e)),
+      currentEpoch: legacy.currentEpoch,
+      nowPlaying: legacy.nowPlaying ? this.migrateEntry(legacy.nowPlaying) : null,
+    }
+  }
+
+  private migrateEntry(legacy: LegacyEntry): Entry {
+    return {
+      id: legacy.id,
+      name: legacy.name,
+      videoId: extractVideoId(legacy.youtubeUrl) ?? '',
+      title: legacy.youtubeTitle,
+      source: 'youtube',
+      votes: legacy.votes,
+      epoch: legacy.epoch,
+      joinedAt: legacy.joinedAt,
+    }
+  }
+
+  private async saveQueueState(state: QueueState): Promise<void> {
     this.queueState = state
     await this.state.storage.put(STATE_KEY, state)
   }
@@ -112,7 +142,7 @@ export class RoomDO implements DurableObject {
    * Returns { firstSong: boolean } indicating if this was the first completed song
    */
   private async recordPerformance(
-    entry: { name: string; youtubeUrl: string; youtubeTitle: string; votes: number },
+    entry: Entry,
     completed: boolean
   ): Promise<{ firstSong: boolean }> {
     const now = Date.now()
@@ -120,7 +150,7 @@ export class RoomDO implements DurableObject {
     const wasFirst = completed && isFirstPerformance(performances, entry.name)
 
     const performance = createPerformance(
-      entry as any, // LegacyEntry compatible
+      entry,
       completed,
       generateId(),
       now
@@ -130,9 +160,8 @@ export class RoomDO implements DurableObject {
     await this.savePerformances(performances)
 
     // Update song stats
-    const videoId = extractVideoId(entry.youtubeUrl)
-    if (videoId) {
-      const existingSong = await this.getSong(videoId)
+    if (entry.videoId) {
+      const existingSong = await this.getSong(entry.videoId)
       const updatedSong = updateSongStats(existingSong, performance)
       await this.saveSong(updatedSong)
     }
@@ -181,7 +210,7 @@ export class RoomDO implements DurableObject {
   private broadcastState(): void {
     if (this.queueState) {
       this.broadcast({
-        type: 'state',
+        kind: 'state',
         state: this.queueState,
         extensionConnected: this.hasExtensionConnected(),
       })
@@ -274,7 +303,7 @@ export class RoomDO implements DurableObject {
       const msg = JSON.parse(message) as ClientMessage
       await this.handleClientMessage(ws, msg)
     } catch {
-      this.send(ws, { type: 'error', message: 'Invalid message format' })
+      this.send(ws, { kind: 'error', message: 'Invalid message format' })
     }
   }
 
@@ -286,7 +315,7 @@ export class RoomDO implements DurableObject {
     // WebSocket is automatically removed from state.getWebSockets()
     // Notify clients if no extensions remain connected
     if (wasExtension && !this.hasExtensionConnected()) {
-      this.broadcast({ type: 'extensionStatus', connected: false })
+      this.broadcast({ kind: 'extensionStatus', connected: false })
     }
   }
 
@@ -295,7 +324,7 @@ export class RoomDO implements DurableObject {
   }
 
   private async handleClientMessage(ws: WebSocket, msg: ClientMessage): Promise<void> {
-    switch (msg.type) {
+    switch (msg.kind) {
       case 'subscribe': {
         // Track extension connections separately
         if (msg.clientType === 'extension') {
@@ -304,20 +333,20 @@ export class RoomDO implements DurableObject {
 
         const state = await this.getQueueState()
         this.send(ws, {
-          type: 'state',
+          kind: 'state',
           state,
           extensionConnected: this.hasExtensionConnected(),
         })
 
         // If extension just connected, notify all other clients
         if (msg.clientType === 'extension') {
-          this.broadcast({ type: 'extensionStatus', connected: true }, ws)
+          this.broadcast({ kind: 'extensionStatus', connected: true }, ws)
         }
         break
       }
 
       case 'ping': {
-        this.send(ws, { type: 'pong' })
+        this.send(ws, { kind: 'pong' })
         break
       }
 
@@ -325,20 +354,21 @@ export class RoomDO implements DurableObject {
         const state = await this.getQueueState()
         const error = canJoinQueue(state, msg.name)
         if (error) {
-          this.send(ws, { type: 'error', message: error })
+          this.send(ws, { kind: 'error', message: error })
           return
         }
 
-        if (!extractVideoId(msg.youtubeUrl)) {
-          this.send(ws, { type: 'error', message: 'Valid YouTube URL required' })
+        if (!msg.videoId) {
+          this.send(ws, { kind: 'error', message: 'Video ID required' })
           return
         }
 
-        const entry = createLegacyEntry({
+        const entry = createEntry({
           id: generateId(),
           name: msg.name,
-          youtubeUrl: msg.youtubeUrl,
-          youtubeTitle: msg.youtubeTitle,
+          videoId: msg.videoId,
+          title: msg.title,
+          source: 'youtube',
           currentEpoch: state.currentEpoch,
           timestamp: Date.now(),
         })
@@ -348,7 +378,7 @@ export class RoomDO implements DurableObject {
         await this.saveQueueState(state)
 
         const position = state.queue.findIndex((e) => e.id === entry.id) + 1
-        this.send(ws, { type: 'joined', entry, position })
+        this.send(ws, { kind: 'joined', entry, position })
         this.broadcastState()
         break
       }
@@ -357,7 +387,7 @@ export class RoomDO implements DurableObject {
         const state = await this.getQueueState()
         const entryIndex = state.queue.findIndex((e) => e.id === msg.entryId)
         if (entryIndex === -1) {
-          this.send(ws, { type: 'error', message: 'Entry not found' })
+          this.send(ws, { kind: 'error', message: 'Entry not found' })
           return
         }
 
@@ -371,7 +401,7 @@ export class RoomDO implements DurableObject {
         await this.saveQueueState(state)
         await this.saveVotes(result.votes)
 
-        this.broadcast({ type: 'voted', entryId: msg.entryId, votes: result.entry.votes })
+        this.broadcast({ kind: 'voted', entryId: msg.entryId, votes: result.entry.votes })
         this.broadcastState()
         break
       }
@@ -380,18 +410,18 @@ export class RoomDO implements DurableObject {
         const state = await this.getQueueState()
         const entry = state.queue.find((e) => e.id === msg.entryId)
         if (!entry) {
-          this.send(ws, { type: 'error', message: 'Entry not found' })
+          this.send(ws, { kind: 'error', message: 'Entry not found' })
           return
         }
 
         if (!canRemoveEntry(entry, msg.isAdmin ?? false, msg.userName ?? null)) {
-          this.send(ws, { type: 'error', message: 'Unauthorized' })
+          this.send(ws, { kind: 'error', message: 'Unauthorized' })
           return
         }
 
         const newState = removeFromQueue(state, msg.entryId)
         if (!newState) {
-          this.send(ws, { type: 'error', message: 'Entry not found' })
+          this.send(ws, { kind: 'error', message: 'Entry not found' })
           return
         }
 
@@ -401,7 +431,7 @@ export class RoomDO implements DurableObject {
         await this.saveQueueState(newState)
         await this.saveVotes(votes)
 
-        this.broadcast({ type: 'removed', entryId: msg.entryId })
+        this.broadcast({ kind: 'removed', entryId: msg.entryId })
         this.broadcastState()
         break
       }
@@ -410,9 +440,9 @@ export class RoomDO implements DurableObject {
         const state = await this.getQueueState()
         if (!canSkipCurrent(state.nowPlaying, msg.isAdmin ?? false, msg.userName ?? null)) {
           if (!state.nowPlaying) {
-            this.send(ws, { type: 'error', message: 'Nothing is playing' })
+            this.send(ws, { kind: 'error', message: 'Nothing is playing' })
           } else {
-            this.send(ws, { type: 'error', message: 'Unauthorized' })
+            this.send(ws, { kind: 'error', message: 'Unauthorized' })
           }
           return
         }
@@ -426,7 +456,7 @@ export class RoomDO implements DurableObject {
         const actualId = state.nowPlaying?.id ?? null
         if (msg.currentId !== actualId) {
           // State mismatch - don't advance, send current state
-          this.send(ws, { type: 'state', state })
+          this.send(ws, { kind: 'state', state })
           return
         }
 
@@ -438,7 +468,7 @@ export class RoomDO implements DurableObject {
         const state = await this.getQueueState()
         const entryIndex = state.queue.findIndex((e) => e.id === msg.entryId)
         if (entryIndex === -1) {
-          this.send(ws, { type: 'error', message: 'Entry not found' })
+          this.send(ws, { kind: 'error', message: 'Entry not found' })
           return
         }
 
@@ -476,17 +506,18 @@ export class RoomDO implements DurableObject {
       }
 
       case 'adminAdd': {
-        if (!extractVideoId(msg.youtubeUrl)) {
-          this.send(ws, { type: 'error', message: 'Valid YouTube URL required' })
+        if (!msg.videoId) {
+          this.send(ws, { kind: 'error', message: 'Video ID required' })
           return
         }
 
         const state = await this.getQueueState()
-        const entry = createLegacyEntry({
+        const entry = createEntry({
           id: generateId(),
           name: msg.name,
-          youtubeUrl: msg.youtubeUrl,
-          youtubeTitle: msg.youtubeTitle,
+          videoId: msg.videoId,
+          title: msg.title,
+          source: 'youtube',
           currentEpoch: -1, // Plays next
           timestamp: Date.now(),
         })
@@ -494,7 +525,7 @@ export class RoomDO implements DurableObject {
         state.queue.unshift(entry)
         await this.saveQueueState(state)
 
-        this.broadcast({ type: 'joined', entry, position: 1 })
+        this.broadcast({ kind: 'joined', entry, position: 1 })
         this.broadcastState()
         break
       }
@@ -502,9 +533,7 @@ export class RoomDO implements DurableObject {
       case 'ended': {
         // Extension reports video end - trigger queue advance
         const state = await this.getQueueState()
-        const currentVideoId = state.nowPlaying
-          ? extractVideoId(state.nowPlaying.youtubeUrl)
-          : null
+        const currentVideoId = state.nowPlaying?.videoId ?? null
 
         // Only advance if video ID matches (idempotency)
         if (currentVideoId === msg.videoId) {
@@ -518,9 +547,7 @@ export class RoomDO implements DurableObject {
         // Extension reports video error - log and advance to next
         console.log(`[RoomDO] Extension reported video error: ${msg.videoId} - ${msg.reason}`)
         const state = await this.getQueueState()
-        const currentVideoId = state.nowPlaying
-          ? extractVideoId(state.nowPlaying.youtubeUrl)
-          : null
+        const currentVideoId = state.nowPlaying?.videoId ?? null
 
         // Only advance if video ID matches
         if (currentVideoId === msg.videoId) {
@@ -531,7 +558,7 @@ export class RoomDO implements DurableObject {
     }
   }
 
-  private async doAdvanceQueue(state: LegacyQueueState): Promise<void> {
+  private async doAdvanceQueue(state: QueueState): Promise<void> {
     const { state: newState, completed } = advanceQueue(state)
 
     if (completed) {
@@ -541,7 +568,7 @@ export class RoomDO implements DurableObject {
     }
 
     await this.saveQueueState(newState)
-    this.broadcast({ type: 'advanced', nowPlaying: newState.nowPlaying, currentEpoch: newState.currentEpoch })
+    this.broadcast({ kind: 'advanced', nowPlaying: newState.nowPlaying, currentEpoch: newState.currentEpoch })
     this.broadcastState()
   }
 
@@ -554,17 +581,17 @@ export class RoomDO implements DurableObject {
   private async handleJoin(request: Request): Promise<Response> {
     const body = (await request.json()) as {
       name?: string
-      youtubeUrl?: string
-      youtubeTitle?: string
+      videoId?: string
+      title?: string
       verified?: boolean  // Client claims they've verified PIN
     }
-    const { name, youtubeUrl, youtubeTitle, verified } = body
+    const { name, videoId, title, verified } = body
 
     if (!name || name.trim() === '') {
       return Response.json({ error: 'Name required' }, { status: 400 })
     }
-    if (!youtubeUrl || !extractVideoId(youtubeUrl)) {
-      return Response.json({ error: 'Valid YouTube URL required' }, { status: 400 })
+    if (!videoId) {
+      return Response.json({ error: 'Video ID required' }, { status: 400 })
     }
 
     const trimmedName = name.trim()
@@ -581,11 +608,12 @@ export class RoomDO implements DurableObject {
       return Response.json({ error: joinError }, { status: 400 })
     }
 
-    const entry = createLegacyEntry({
+    const entry = createEntry({
       id: generateId(),
       name: trimmedName,
-      youtubeUrl,
-      youtubeTitle: youtubeTitle ?? 'Unknown Song',
+      videoId,
+      title: title ?? 'Unknown Song',
+      source: 'youtube',
       currentEpoch: state.currentEpoch,
       timestamp: Date.now(),
     })
@@ -718,7 +746,7 @@ export class RoomDO implements DurableObject {
     return this.doAdvanceQueueHttp(state, firstSong)
   }
 
-  private async doAdvanceQueueHttp(state: LegacyQueueState, firstSong = false): Promise<Response> {
+  private async doAdvanceQueueHttp(state: QueueState, firstSong = false): Promise<Response> {
     const { state: newState, completed } = advanceQueue(state)
 
     if (completed) {
@@ -796,23 +824,24 @@ export class RoomDO implements DurableObject {
       return Response.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
-    const body = (await request.json()) as { name?: string; youtubeUrl?: string; youtubeTitle?: string }
-    const { name, youtubeUrl, youtubeTitle } = body
+    const body = (await request.json()) as { name?: string; videoId?: string; title?: string }
+    const { name, videoId, title } = body
 
     if (!name || name.trim() === '') {
       return Response.json({ error: 'Name required' }, { status: 400 })
     }
-    if (!youtubeUrl || !extractVideoId(youtubeUrl)) {
-      return Response.json({ error: 'Valid YouTube URL required' }, { status: 400 })
+    if (!videoId) {
+      return Response.json({ error: 'Video ID required' }, { status: 400 })
     }
 
     const state = await this.getQueueState()
 
-    const entry = createLegacyEntry({
+    const entry = createEntry({
       id: generateId(),
       name,
-      youtubeUrl,
-      youtubeTitle: youtubeTitle ?? 'Unknown Song',
+      videoId,
+      title: title ?? 'Unknown Song',
+      source: 'youtube',
       currentEpoch: -1,
       timestamp: Date.now(),
     })
@@ -858,7 +887,7 @@ export class RoomDO implements DurableObject {
   }
 
   private async handleImport(request: Request): Promise<Response> {
-    const body = (await request.json()) as { state?: LegacyQueueState; votes?: VoteRecord }
+    const body = (await request.json()) as { state?: QueueState | LegacyQueueState; votes?: VoteRecord }
     const { state: importState, votes: importVotes } = body
 
     if (!importState) {
@@ -871,7 +900,9 @@ export class RoomDO implements DurableObject {
       return Response.json({ success: false, reason: 'do_not_empty' })
     }
 
-    await this.saveQueueState(importState)
+    // Migrate the imported state if needed
+    const migratedState = this.migrateState(importState)
+    await this.saveQueueState(migratedState)
     if (importVotes) {
       await this.saveVotes(importVotes)
     }

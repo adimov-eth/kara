@@ -3,7 +3,6 @@ export {
   sortQueue,
   generateId,
   createEntry,
-  createLegacyEntry,
   canJoinQueue,
   applyVote,
   advanceQueue,

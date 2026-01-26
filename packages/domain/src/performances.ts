@@ -1,22 +1,20 @@
-import type { LegacyEntry, Performance, Song } from '@karaoke/types'
-import { extractVideoId } from './youtube.js'
+import type { Entry, Performance, Song } from '@karaoke/types'
 
 /**
  * Create a performance record from a completed/skipped entry
  * Pure function - id and timestamp are injected
  */
 export function createPerformance(
-  entry: LegacyEntry,
+  entry: Entry,
   completed: boolean,
   id: string,
   timestamp: number
 ): Performance {
-  const videoId = extractVideoId(entry.youtubeUrl) ?? ''
   return {
     id,
     name: entry.name,
-    videoId,
-    title: entry.youtubeTitle,
+    videoId: entry.videoId,
+    title: entry.title,
     performedAt: timestamp,
     votes: entry.votes,
     completed,

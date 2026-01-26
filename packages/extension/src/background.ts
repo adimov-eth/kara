@@ -1,4 +1,4 @@
-import type { LegacyQueueState } from '@karaoke/types'
+import type { QueueState } from '@karaoke/types'
 import type { ExtensionToServer, BackgroundToContent, ContentToBackground, StoredState } from './types.js'
 
 const WS_URL = 'wss://karaoke-queue.boris-47d.workers.dev/?upgrade=websocket'
@@ -7,26 +7,7 @@ const KEEPALIVE_INTERVAL = 0.5 // minutes
 
 let ws: WebSocket | null = null
 let reconnectAttempts = 0
-let queueState: LegacyQueueState | null = null
-
-function extractVideoId(url: string | null | undefined): string | null {
-  if (!url) return null
-  const normalizedUrl = url.trim()
-
-  const patterns = [
-    /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([a-zA-Z0-9_-]{11})/,
-    /youtube\.com\/watch\?.*&v=([a-zA-Z0-9_-]{11})/,
-    /youtube\.com\/shorts\/([a-zA-Z0-9_-]{11})/,
-    /music\.youtube\.com\/watch\?v=([a-zA-Z0-9_-]{11})/,
-  ]
-
-  for (const pattern of patterns) {
-    const match = normalizedUrl.match(pattern)
-    if (match?.[1]) return match[1]
-  }
-
-  return null
-}
+let queueState: QueueState | null = null
 
 async function saveState(state: Partial<StoredState>): Promise<void> {
   await chrome.storage.local.set(state)
@@ -42,7 +23,7 @@ async function connect(): Promise<void> {
   ws.onopen = () => {
     console.log('[Karaoke] WebSocket connected')
     reconnectAttempts = 0
-    ws!.send(JSON.stringify({ type: 'subscribe', clientType: 'extension' } satisfies ExtensionToServer))
+    ws!.send(JSON.stringify({ kind: 'subscribe', clientType: 'extension' } satisfies ExtensionToServer))
 
     // Start keepalive alarm
     chrome.alarms.create('keepalive', { periodInMinutes: KEEPALIVE_INTERVAL })
@@ -75,9 +56,9 @@ function scheduleReconnect(): void {
 
 function handleMessage(data: string): void {
   try {
-    const msg = JSON.parse(data) as { type: string; state?: LegacyQueueState }
+    const msg = JSON.parse(data) as { kind: string; state?: QueueState }
 
-    switch (msg.type) {
+    switch (msg.kind) {
       case 'state':
         if (msg.state) {
           const previousNowPlaying = queueState?.nowPlaying
@@ -89,8 +70,8 @@ function handleMessage(data: string): void {
 
           // If nowPlaying changed, send play command
           if (msg.state.nowPlaying) {
-            const newVideoId = extractVideoId(msg.state.nowPlaying.youtubeUrl)
-            const oldVideoId = previousNowPlaying ? extractVideoId(previousNowPlaying.youtubeUrl) : null
+            const newVideoId = msg.state.nowPlaying.videoId
+            const oldVideoId = previousNowPlaying?.videoId ?? null
 
             if (newVideoId && newVideoId !== oldVideoId) {
               console.log('[Karaoke] Now playing changed, sending play command:', newVideoId)
@@ -105,7 +86,7 @@ function handleMessage(data: string): void {
         break
 
       default:
-        console.log('[Karaoke] Unknown message type:', msg.type)
+        console.log('[Karaoke] Unknown message kind:', msg.kind)
     }
   } catch (err) {
     console.error('[Karaoke] Failed to parse message:', err)
@@ -117,7 +98,7 @@ function handleVideoEnded(videoId: string): void {
 
   // Report to server
   if (ws?.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: 'ended', videoId } satisfies ExtensionToServer))
+    ws.send(JSON.stringify({ kind: 'ended', videoId } satisfies ExtensionToServer))
   }
 }
 
@@ -126,13 +107,13 @@ function handleVideoError(videoId: string, reason: string): void {
 
   // Report to server
   if (ws?.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: 'error', videoId, reason } satisfies ExtensionToServer))
+    ws.send(JSON.stringify({ kind: 'error', videoId, reason } satisfies ExtensionToServer))
   }
 }
 
 function sendPing(): void {
   if (ws?.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: 'ping' } satisfies ExtensionToServer))
+    ws.send(JSON.stringify({ kind: 'ping' } satisfies ExtensionToServer))
   }
 }
 
@@ -166,11 +147,8 @@ chrome.runtime.onMessage.addListener((message: ContentToBackground, _sender, sen
       // Content script is ready, send current state if we have it
       if (queueState) {
         sendToYouTubeTabs({ type: 'state', state: queueState })
-        if (queueState.nowPlaying) {
-          const videoId = extractVideoId(queueState.nowPlaying.youtubeUrl)
-          if (videoId) {
-            sendToYouTubeTabs({ type: 'play', videoId })
-          }
+        if (queueState.nowPlaying?.videoId) {
+          sendToYouTubeTabs({ type: 'play', videoId: queueState.nowPlaying.videoId })
         }
       }
       break
