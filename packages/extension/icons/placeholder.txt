@@ -1,0 +1,9 @@
+Placeholder icons - replace these with actual icons:
+- icon-16.png (16x16 pixels)
+- icon-48.png (48x48 pixels)
+- icon-128.png (128x128 pixels)
+
+You can create simple icons using ImageMagick:
+convert -size 16x16 xc:#ff6b9d icon-16.png
+convert -size 48x48 xc:#ff6b9d icon-48.png
+convert -size 128x128 xc:#ff6b9d icon-128.png

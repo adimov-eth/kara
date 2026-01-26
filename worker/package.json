@@ -1,0 +1,22 @@
+{
+  "name": "@karaoke/worker",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --format=esm --outfile=dist/worker.js --external:cloudflare:*",
+    "dev": "wrangler dev",
+    "deploy": "pnpm build && wrangler deploy",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@karaoke/domain": "workspace:*",
+    "@karaoke/types": "workspace:*"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240117.0",
+    "esbuild": "^0.20.0",
+    "typescript": "^5.3.3",
+    "wrangler": "^3.24.0"
+  }
+}

@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=300, initial-scale=1.0">
+  <title>Karaoke Queue</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    :root {
+      --bg-deep: #0a0a0f;
+      --bg-card: #12121a;
+      --accent: #ff6b9d;
+      --cyan: #4ecdc4;
+      --text: #f0f0f5;
+      --text-muted: #6b6b80;
+      --success: #7bed9f;
+      --warning: #ffa502;
+    }
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: var(--bg-deep);
+      color: var(--text);
+      width: 300px;
+      padding: 16px;
+    }
+    h1 {
+      font-size: 1.25rem;
+      font-weight: 600;
+      background: linear-gradient(135deg, var(--accent) 0%, var(--cyan) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      margin-bottom: 16px;
+    }
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px;
+      border-radius: 8px;
+      background: var(--bg-card);
+      margin-bottom: 12px;
+    }
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .status-dot.connected {
+      background: var(--success);
+      box-shadow: 0 0 8px var(--success);
+    }
+    .status-dot.disconnected {
+      background: var(--warning);
+      box-shadow: 0 0 8px var(--warning);
+    }
+    .status-text {
+      font-size: 0.9rem;
+    }
+    .now-playing {
+      padding: 12px;
+      border-radius: 8px;
+      background: var(--bg-card);
+      border: 1px solid rgba(255, 107, 157, 0.3);
+    }
+    .now-playing-label {
+      font-size: 0.75rem;
+      color: var(--accent);
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 8px;
+    }
+    .now-playing-title {
+      font-size: 0.95rem;
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-bottom: 4px;
+    }
+    .now-playing-singer {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+    }
+    .empty {
+      color: var(--text-muted);
+      font-style: italic;
+    }
+    .queue-count {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      margin-top: 12px;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <h1>Karaoke Queue</h1>
+
+  <div class="status">
+    <div class="status-dot disconnected" id="statusDot"></div>
+    <span class="status-text" id="statusText">Connecting...</span>
+  </div>
+
+  <div class="now-playing" id="nowPlayingCard" style="display: none;">
+    <div class="now-playing-label">Now Playing</div>
+    <div class="now-playing-title" id="nowPlayingTitle"></div>
+    <div class="now-playing-singer" id="nowPlayingSinger"></div>
+  </div>
+
+  <div class="now-playing" id="emptyCard">
+    <p class="empty">No song playing</p>
+  </div>
+
+  <p class="queue-count" id="queueCount"></p>
+
+  <script src="popup.js" type="module"></script>
+</body>
+</html>

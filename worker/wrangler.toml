@@ -1,0 +1,33 @@
+name = "karaoke-queue"
+main = "dist/worker.js"
+compatibility_date = "2024-01-01"
+
+[[kv_namespaces]]
+binding = "KARAOKE_KV"
+id = "31425b61dea34153afd11f446c29b456"
+
+# Durable Objects
+[[durable_objects.bindings]]
+name = "ROOM"
+class_name = "RoomDO"
+
+# Use SQLite storage (required for free tier)
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["RoomDO"]
+
+# Staging environment
+[env.staging]
+name = "karaoke-queue-staging"
+
+[[env.staging.kv_namespaces]]
+binding = "KARAOKE_KV"
+id = "7b619514e9534f359baf618ee4574d88"
+
+[[env.staging.durable_objects.bindings]]
+name = "ROOM"
+class_name = "RoomDO"
+
+[[env.staging.migrations]]
+tag = "v3"
+new_sqlite_classes = ["RoomDO"]
