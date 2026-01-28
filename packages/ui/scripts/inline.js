@@ -19,7 +19,7 @@ const views = [
   { route: '', varName: 'LANDING_HTML', title: 'Karaoke - Join a Room', outputName: 'landing' },
   { route: 'guest', varName: 'GUEST_HTML', title: 'Karaoke Queue', outputName: 'guest' },
   { route: 'player', varName: 'PLAYER_HTML', title: 'Karaoke Player', outputName: 'player' },
-  { route: 'shikashika', varName: 'ADMIN_HTML', title: 'Karaoke Admin', outputName: 'admin' },
+  { route: 'admin', varName: 'ADMIN_HTML', title: 'Karaoke Admin', outputName: 'admin' },
 ];
 
 function findFiles(dir, pattern) {
@@ -72,6 +72,11 @@ async function inlineView(view) {
     return null;
   }
 
+  // Extract the SvelteKit global variable name (e.g., __sveltekit_ru6cdy)
+  // This changes per-build, so we need to extract it from the HTML
+  const sveltekitVarMatch = html.match(/__sveltekit_([a-z0-9]+)\s*=/);
+  const sveltekitVar = sveltekitVarMatch ? `__sveltekit_${sveltekitVarMatch[1]}` : '__sveltekit_base';
+
   const startPath = join(distDir, startMatch[1]);
   const appPath = join(distDir, appMatch[1]);
 
@@ -81,7 +86,7 @@ import * as kit from '${startPath}';
 import * as app from '${appPath}';
 
 const base = new URL(".", location).pathname.slice(0, -1);
-globalThis.__sveltekit_ekxh2u = { base };
+globalThis.${sveltekitVar} = { base };
 
 const element = document.querySelector('[data-sveltekit-preload-data]') || document.body.firstElementChild || document.body;
 kit.start(app, element);

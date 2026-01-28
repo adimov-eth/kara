@@ -4,11 +4,11 @@ import { GUEST_HTML, PLAYER_HTML, ADMIN_HTML, LANDING_HTML } from './views/gener
 // Re-export RoomDO for Cloudflare to find it
 export { RoomDO } from './room.js'
 
-const ADMIN_PATH = '/shikashika'
+const ADMIN_PATH = '/admin'
 const DEFAULT_ROOM_ID = 'default'
 
 // Reserved paths that cannot be room IDs
-const RESERVED_PATHS = new Set(['api', 'player', 'admin', 'shikashika'])
+const RESERVED_PATHS = new Set(['api', 'player', 'admin'])
 
 // Room ID validation regex: 2-30 chars, lowercase alphanumeric + hyphens
 const ROOM_ID_REGEX = /^[a-z0-9][a-z0-9-]{0,28}[a-z0-9]$|^[a-z0-9]{1,2}$/
@@ -125,7 +125,7 @@ export default {
             headers: { 'Content-Type': 'text/html; charset=utf-8' },
           })
         }
-        if (subPath === '/admin') {
+        if (subPath === ADMIN_PATH) {
           return new Response(ADMIN_HTML, {
             headers: { 'Content-Type': 'text/html; charset=utf-8' },
           })
