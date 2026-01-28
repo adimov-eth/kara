@@ -34,10 +34,13 @@
 </script>
 
 <li class="queue-item" class:is-mine={isMine}>
-  <span class="position">{position}</span>
+  <span class="position" class:is-mine={isMine}>{position}</span>
   <div class="queue-info">
     <div class="queue-song">{entry.title}</div>
-    <div class="queue-singer">{entry.name}</div>
+    <div class="queue-singer">
+      {entry.name}
+      {#if isMine}<span class="you-badge">YOU</span>{/if}
+    </div>
   </div>
   {#if !readonly}
     <div class="queue-actions">
@@ -95,6 +98,11 @@
     color: var(--text-muted);
   }
 
+  .position.is-mine {
+    background: var(--cyan);
+    color: var(--bg);
+  }
+
   .queue-info {
     flex: 1;
     min-width: 0;
@@ -112,6 +120,19 @@
   .queue-singer {
     font-size: 0.8rem;
     color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .you-badge {
+    background: var(--cyan);
+    color: var(--bg);
+    font-size: 0.6rem;
+    font-weight: 700;
+    padding: 2px 6px;
+    border-radius: 4px;
+    letter-spacing: 0.05em;
   }
 
   .queue-actions {

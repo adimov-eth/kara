@@ -1,4 +1,5 @@
 import type { ServerMessage, ClientMessage, ClientType, QueueState } from '@karaoke/types';
+import { getRoomId } from './api';
 
 type StateHandler = (state: QueueState, extensionConnected?: boolean) => void;
 type ExtensionStatusHandler = (connected: boolean) => void;
@@ -70,7 +71,8 @@ export function createWebSocket(): WebSocketManager {
     if (typeof window === 'undefined') return;
 
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${location.host}/?upgrade=websocket`;
+    const roomId = getRoomId();
+    const wsUrl = `${protocol}//${location.host}/?upgrade=websocket&room=${encodeURIComponent(roomId)}`;
 
     try {
       ws = new WebSocket(wsUrl);

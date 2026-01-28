@@ -26,6 +26,10 @@ function error(message: string, duration = 3000) {
   show(message, 'error', duration);
 }
 
+function info(message: string, duration = 3000) {
+  show(message, 'info', duration);
+}
+
 function dismiss(id: number) {
   toasts = toasts.filter(t => t.id !== id);
 }
@@ -35,5 +39,6 @@ export const toastStore = {
   show,
   success,
   error,
+  info,
   dismiss,
 };

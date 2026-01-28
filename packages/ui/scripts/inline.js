@@ -14,9 +14,10 @@ const distDir = join(__dirname, '..', 'dist');
 const outputDir = join(__dirname, '..', '..', '..', 'worker', 'src', 'views', 'generated');
 
 // View mapping: route name -> output variable name
-// Note: '' (root) is the guest view, 'shikashika' is the admin route (secret path)
+// Note: '' (root) is now the landing page, 'guest' is the queue view (served at /{roomId})
 const views = [
-  { route: '', varName: 'GUEST_HTML', title: 'Karaoke Queue', outputName: 'guest' },
+  { route: '', varName: 'LANDING_HTML', title: 'Karaoke - Join a Room', outputName: 'landing' },
+  { route: 'guest', varName: 'GUEST_HTML', title: 'Karaoke Queue', outputName: 'guest' },
   { route: 'player', varName: 'PLAYER_HTML', title: 'Karaoke Player', outputName: 'player' },
   { route: 'shikashika', varName: 'ADMIN_HTML', title: 'Karaoke Admin', outputName: 'admin' },
 ];

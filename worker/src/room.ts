@@ -1,14 +1,32 @@
-import type {
-  QueueState,
-  Entry,
-  LegacyQueueState,
-  LegacyEntry,
-  VoteRecord,
-  ServerMessage,
-  ClientMessage,
-  Performance,
-  Song,
-  Identity,
+import {
+  assertNever,
+  type QueueState,
+  type Entry,
+  type LegacyQueueState,
+  type LegacyEntry,
+  type LegacyPerformance,
+  type VoteRecord,
+  type ServerMessage,
+  type ClientMessage,
+  type Performance,
+  type PerformanceOutcome,
+  type Identity,
+  type RoomConfig,
+  type RoomAdmin,
+  type AdminSession,
+  type JoinResult,
+  type VoteResult,
+  type RemoveResult,
+  type SkipResult,
+  type NextResult,
+  type ClaimResult,
+  type VerifyResult,
+  type SearchQueryResult,
+  type ReorderResult,
+  type PopularSongsResult,
+  type CreateRoomResult,
+  type CheckRoomResult,
+  type AdminVerifyResult,
 } from '@karaoke/types'
 import {
   sortQueue,
@@ -19,15 +37,15 @@ import {
   removeFromQueue,
   canRemoveEntry,
   canSkipCurrent,
+  reorderEntry,
   extractVideoId,
   parseSearchResponse,
   generateId,
   createPerformance,
-  updateSongStats,
-  calculatePopularity,
   isFirstPerformance,
   getPerformanceHistory,
   calculateSingerStats,
+  getPopularSongs,
   generateSalt,
   hashPin,
   verifyPin,
@@ -38,12 +56,29 @@ import {
 const STATE_KEY = 'state'
 const VOTES_KEY = 'votes'
 const PERFORMANCES_KEY = 'performances'
+const CONFIG_KEY = 'config'
+const ADMIN_KEY = 'admin'
+
+const ADMIN_SESSION_DURATION_MS = 4 * 60 * 60 * 1000 // 4 hours
+const PIN_RATE_LIMIT_WINDOW_MS = 60 * 1000 // 1 minute
+const PIN_RATE_LIMIT_MAX_ATTEMPTS = 5
+
+interface RateLimitEntry {
+  attempts: number
+  windowStart: number
+}
 
 export class RoomDO implements DurableObject {
   private state: DurableObjectState
   private queueState: QueueState | null = null
   private votes: VoteRecord | null = null
   private performances: Performance[] | null = null
+  private roomConfig: RoomConfig | null = null
+  private roomAdmin: RoomAdmin | null = null
+  // Admin sessions (in-memory, not persisted - sessions clear on DO restart)
+  private adminSessions: Map<string, AdminSession> = new Map()
+  // Rate limiting for PIN attempts (in-memory)
+  private pinRateLimits: Map<string, RateLimitEntry> = new Map()
   // Track extension WebSockets separately (tags can't be updated after acceptWebSocket)
   private extensionSockets: Set<WebSocket> = new Set()
 
@@ -108,23 +143,36 @@ export class RoomDO implements DurableObject {
 
   private async getPerformances(): Promise<Performance[]> {
     if (!this.performances) {
-      const stored = await this.state.storage.get<Performance[]>(PERFORMANCES_KEY)
-      this.performances = stored ?? []
+      const stored = await this.state.storage.get<Performance[] | LegacyPerformance[]>(PERFORMANCES_KEY)
+      this.performances = stored ? this.migratePerformances(stored) : []
     }
     return this.performances
+  }
+
+  private migratePerformances(stored: Performance[] | LegacyPerformance[]): Performance[] {
+    if (stored.length === 0) return []
+    // Detect legacy format by checking first entry for 'completed' boolean
+    const first = stored[0]!
+    if ('completed' in first && typeof first.completed === 'boolean') {
+      // Migrate legacy format
+      return (stored as LegacyPerformance[]).map((legacy): Performance => ({
+        id: legacy.id,
+        name: legacy.name,
+        videoId: legacy.videoId,
+        title: legacy.title,
+        performedAt: legacy.performedAt,
+        votes: legacy.votes,
+        outcome: legacy.completed
+          ? { kind: 'completed' }
+          : { kind: 'skipped', by: 'admin' } // Can't distinguish who skipped in legacy data
+      }))
+    }
+    return stored as Performance[]
   }
 
   private async savePerformances(performances: Performance[]): Promise<void> {
     this.performances = performances
     await this.state.storage.put(PERFORMANCES_KEY, performances)
-  }
-
-  private async getSong(videoId: string): Promise<Song | null> {
-    return await this.state.storage.get<Song>(`song:${videoId}`) ?? null
-  }
-
-  private async saveSong(song: Song): Promise<void> {
-    await this.state.storage.put(`song:${song.videoId}`, song)
   }
 
   private async getIdentity(name: string): Promise<Identity | null> {
@@ -137,34 +185,141 @@ export class RoomDO implements DurableObject {
     await this.state.storage.put(key, identity)
   }
 
+  // =========================================================================
+  // Room Config & Admin Methods
+  // =========================================================================
+
+  private async getRoomConfig(): Promise<RoomConfig | null> {
+    if (this.roomConfig === null) {
+      this.roomConfig = await this.state.storage.get<RoomConfig>(CONFIG_KEY) ?? null
+    }
+    return this.roomConfig
+  }
+
+  private async saveRoomConfig(config: RoomConfig): Promise<void> {
+    this.roomConfig = config
+    await this.state.storage.put(CONFIG_KEY, config)
+  }
+
+  private async getRoomAdmin(): Promise<RoomAdmin | null> {
+    if (this.roomAdmin === null) {
+      this.roomAdmin = await this.state.storage.get<RoomAdmin>(ADMIN_KEY) ?? null
+    }
+    return this.roomAdmin
+  }
+
+  private async saveRoomAdmin(admin: RoomAdmin): Promise<void> {
+    this.roomAdmin = admin
+    await this.state.storage.put(ADMIN_KEY, admin)
+  }
+
+  private createAdminSession(): AdminSession {
+    // Generate random 64-char hex token
+    const bytes = new Uint8Array(32)
+    crypto.getRandomValues(bytes)
+    const token = Array.from(bytes)
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('')
+
+    const now = Date.now()
+    const session: AdminSession = {
+      token,
+      createdAt: now,
+      expiresAt: now + ADMIN_SESSION_DURATION_MS,
+    }
+
+    this.adminSessions.set(token, session)
+    return session
+  }
+
+  private isValidAdminToken(token: string | null): boolean {
+    if (!token) return false
+    const session = this.adminSessions.get(token)
+    if (!session) return false
+    if (Date.now() > session.expiresAt) {
+      this.adminSessions.delete(token)
+      return false
+    }
+    return true
+  }
+
+  private extractAdminToken(request: Request): string | null {
+    const authHeader = request.headers.get('Authorization')
+    if (authHeader?.startsWith('Bearer ')) {
+      return authHeader.slice(7)
+    }
+    return null
+  }
+
+  /**
+   * Check if request is authorized as admin.
+   * Requires valid token if room has admin configured.
+   * Allows X-Admin header only for rooms without admin (legacy/default room).
+   */
+  private async isAdminRequest(request: Request): Promise<boolean> {
+    const token = this.extractAdminToken(request)
+    if (this.isValidAdminToken(token)) {
+      return true
+    }
+    // Allow X-Admin header only for rooms without admin configured
+    const admin = await this.getRoomAdmin()
+    if (!admin && request.headers.get('X-Admin') === 'true') {
+      return true
+    }
+    return false
+  }
+
+  /**
+   * Check rate limit for PIN attempts. Returns true if request should be blocked.
+   */
+  private checkPinRateLimit(clientId: string): boolean {
+    const now = Date.now()
+    const entry = this.pinRateLimits.get(clientId)
+
+    if (!entry || now - entry.windowStart > PIN_RATE_LIMIT_WINDOW_MS) {
+      // New window
+      this.pinRateLimits.set(clientId, { attempts: 1, windowStart: now })
+      return false
+    }
+
+    if (entry.attempts >= PIN_RATE_LIMIT_MAX_ATTEMPTS) {
+      return true // Blocked
+    }
+
+    entry.attempts++
+    return false
+  }
+
+  /**
+   * Get client identifier for rate limiting (IP or fallback)
+   */
+  private getClientId(request: Request): string {
+    return request.headers.get('CF-Connecting-IP') ||
+           request.headers.get('X-Forwarded-For')?.split(',')[0]?.trim() ||
+           'unknown'
+  }
+
   /**
    * Record a performance (when song completes or is skipped)
    * Returns { firstSong: boolean } indicating if this was the first completed song
    */
   private async recordPerformance(
     entry: Entry,
-    completed: boolean
+    outcome: PerformanceOutcome
   ): Promise<{ firstSong: boolean }> {
     const now = Date.now()
     const performances = await this.getPerformances()
-    const wasFirst = completed && isFirstPerformance(performances, entry.name)
+    const wasFirst = outcome.kind === 'completed' && isFirstPerformance(performances, entry.name)
 
     const performance = createPerformance(
       entry,
-      completed,
+      outcome,
       generateId(),
       now
     )
 
     performances.push(performance)
     await this.savePerformances(performances)
-
-    // Update song stats
-    if (entry.videoId) {
-      const existingSong = await this.getSong(entry.videoId)
-      const updatedSong = updateSongStats(existingSong, performance)
-      await this.saveSong(updatedSong)
-    }
 
     return { firstSong: wasFirst }
   }
@@ -277,6 +432,20 @@ export class RoomDO implements DurableObject {
       if (path.startsWith('/api/identity/') && request.method === 'GET') {
         const name = decodeURIComponent(path.slice('/api/identity/'.length))
         return this.handleGetIdentity(name)
+      }
+
+      // Room management endpoints
+      if (path === '/api/room/check' && request.method === 'GET') {
+        return this.handleCheckRoom()
+      }
+      if (path === '/api/room/create' && request.method === 'POST') {
+        return this.handleCreateRoom(request)
+      }
+      if (path === '/api/room/config' && request.method === 'GET') {
+        return this.handleGetConfig()
+      }
+      if (path === '/api/admin/verify' && request.method === 'POST') {
+        return this.handleAdminVerify(request)
       }
 
       return new Response('Not found', { status: 404 })
@@ -438,7 +607,8 @@ export class RoomDO implements DurableObject {
 
       case 'skip': {
         const state = await this.getQueueState()
-        if (!canSkipCurrent(state.nowPlaying, msg.isAdmin ?? false, msg.userName ?? null)) {
+        const isAdmin = msg.isAdmin ?? false
+        if (!canSkipCurrent(state.nowPlaying, isAdmin, msg.userName ?? null)) {
           if (!state.nowPlaying) {
             this.send(ws, { kind: 'error', message: 'Nothing is playing' })
           } else {
@@ -447,7 +617,8 @@ export class RoomDO implements DurableObject {
           return
         }
 
-        await this.doAdvanceQueue(state)
+        const skippedBy = isAdmin ? 'admin' : 'singer' as const
+        await this.doAdvanceQueue(state, { kind: 'skipped', by: skippedBy })
         break
       }
 
@@ -460,44 +631,31 @@ export class RoomDO implements DurableObject {
           return
         }
 
-        await this.doAdvanceQueue(state)
+        await this.doAdvanceQueue(state, { kind: 'completed' })
         break
       }
 
       case 'reorder': {
         const state = await this.getQueueState()
-        const entryIndex = state.queue.findIndex((e) => e.id === msg.entryId)
-        if (entryIndex === -1) {
-          this.send(ws, { kind: 'error', message: 'Entry not found' })
-          return
-        }
-
-        const entry = state.queue[entryIndex]!
 
         if (typeof msg.newEpoch === 'number') {
-          entry.epoch = msg.newEpoch
-        }
-
-        if (typeof msg.newPosition === 'number') {
-          state.queue.splice(entryIndex, 1)
-          const targetIndex = Math.min(Math.max(0, msg.newPosition), state.queue.length)
-          state.queue.splice(targetIndex, 0, entry)
-
-          if (targetIndex > 0) {
-            const prevEntry = state.queue[targetIndex - 1]
-            if (prevEntry) {
-              entry.epoch = prevEntry.epoch
-              entry.joinedAt = prevEntry.joinedAt - 1
-            }
-          } else if (state.queue.length > 1) {
-            const nextEntry = state.queue[1]
-            if (nextEntry) {
-              entry.epoch = nextEntry.epoch
-              entry.joinedAt = nextEntry.joinedAt - 1
-            }
+          const entry = state.queue.find((e) => e.id === msg.entryId)
+          if (!entry) {
+            this.send(ws, { kind: 'error', message: 'Entry not found' })
+            return
           }
-        } else {
+          entry.epoch = msg.newEpoch
           state.queue = sortQueue(state.queue)
+        } else if (typeof msg.newPosition === 'number') {
+          const newQueue = reorderEntry(state.queue, msg.entryId, msg.newPosition)
+          if (!newQueue) {
+            this.send(ws, { kind: 'error', message: 'Entry not found' })
+            return
+          }
+          state.queue = newQueue
+        } else {
+          this.send(ws, { kind: 'error', message: 'newEpoch or newPosition required' })
+          return
         }
 
         await this.saveQueueState(state)
@@ -537,7 +695,7 @@ export class RoomDO implements DurableObject {
 
         // Only advance if video ID matches (idempotency)
         if (currentVideoId === msg.videoId) {
-          await this.doAdvanceQueue(state)
+          await this.doAdvanceQueue(state, { kind: 'completed' })
         }
         // If mismatch, state broadcast will correct extension
         break
@@ -551,14 +709,31 @@ export class RoomDO implements DurableObject {
 
         // Only advance if video ID matches
         if (currentVideoId === msg.videoId) {
-          await this.doAdvanceQueue(state)
+          await this.doAdvanceQueue(state, { kind: 'errored', reason: msg.reason })
         }
         break
       }
+
+      default:
+        assertNever(msg)
     }
   }
 
-  private async doAdvanceQueue(state: QueueState): Promise<void> {
+  /**
+   * Core queue advancement logic - shared by WebSocket and HTTP handlers
+   * Records performance, advances queue, cleans up votes, broadcasts
+   */
+  private async doAdvanceQueueCore(
+    state: QueueState,
+    outcome: PerformanceOutcome
+  ): Promise<{ newState: QueueState; firstSong: boolean }> {
+    // Record performance before advancing
+    let firstSong = false
+    if (state.nowPlaying) {
+      const recordResult = await this.recordPerformance(state.nowPlaying, outcome)
+      firstSong = recordResult.firstSong
+    }
+
     const { state: newState, completed } = advanceQueue(state)
 
     if (completed) {
@@ -570,6 +745,12 @@ export class RoomDO implements DurableObject {
     await this.saveQueueState(newState)
     this.broadcast({ kind: 'advanced', nowPlaying: newState.nowPlaying, currentEpoch: newState.currentEpoch })
     this.broadcastState()
+
+    return { newState, firstSong }
+  }
+
+  private async doAdvanceQueue(state: QueueState, outcome: PerformanceOutcome): Promise<void> {
+    await this.doAdvanceQueueCore(state, outcome)
   }
 
   // HTTP handlers for backwards compatibility
@@ -588,10 +769,12 @@ export class RoomDO implements DurableObject {
     const { name, videoId, title, verified } = body
 
     if (!name || name.trim() === '') {
-      return Response.json({ error: 'Name required' }, { status: 400 })
+      const result: JoinResult = { kind: 'error', message: 'Name required' }
+      return Response.json(result, { status: 400 })
     }
     if (!videoId) {
-      return Response.json({ error: 'Video ID required' }, { status: 400 })
+      const result: JoinResult = { kind: 'invalidVideo', reason: 'Video ID required' }
+      return Response.json(result, { status: 400 })
     }
 
     const trimmedName = name.trim()
@@ -599,13 +782,20 @@ export class RoomDO implements DurableObject {
     // Check if name is claimed with PIN
     const identity = await this.getIdentity(trimmedName)
     if (identity && !verified) {
-      return Response.json({ requiresPin: true }, { status: 200 })
+      const result: JoinResult = { kind: 'requiresPin' }
+      return Response.json(result)
     }
 
     const state = await this.getQueueState()
     const joinError = canJoinQueue(state, name)
     if (joinError) {
-      return Response.json({ error: joinError }, { status: 400 })
+      // Check if the error is about already being in queue
+      if (joinError.includes('already in queue')) {
+        const result: JoinResult = { kind: 'alreadyInQueue', name: trimmedName }
+        return Response.json(result, { status: 400 })
+      }
+      const result: JoinResult = { kind: 'error', message: joinError }
+      return Response.json(result, { status: 400 })
     }
 
     const entry = createEntry({
@@ -624,7 +814,8 @@ export class RoomDO implements DurableObject {
 
     const position = state.queue.findIndex((e) => e.id === entry.id) + 1
     this.broadcastState()
-    return Response.json({ success: true, entry, position })
+    const result: JoinResult = { kind: 'joined', entry, position }
+    return Response.json(result)
   }
 
   private async handleVote(request: Request): Promise<Response> {
@@ -633,60 +824,69 @@ export class RoomDO implements DurableObject {
     const voterId = request.headers.get('X-Voter-Id')
 
     if (!voterId) {
-      return Response.json({ error: 'Voter ID required' }, { status: 400 })
+      const result: VoteResult = { kind: 'error', message: 'Voter ID required' }
+      return Response.json(result, { status: 400 })
     }
     if (!entryId) {
-      return Response.json({ error: 'Entry ID required' }, { status: 400 })
+      const result: VoteResult = { kind: 'error', message: 'Entry ID required' }
+      return Response.json(result, { status: 400 })
     }
     if (direction !== 1 && direction !== -1 && direction !== 0) {
-      return Response.json({ error: 'Direction must be 1, -1, or 0' }, { status: 400 })
+      const result: VoteResult = { kind: 'error', message: 'Direction must be 1, -1, or 0' }
+      return Response.json(result, { status: 400 })
     }
 
     const state = await this.getQueueState()
     const entryIndex = state.queue.findIndex((e) => e.id === entryId)
 
     if (entryIndex === -1) {
-      return Response.json({ error: 'Entry not found' }, { status: 404 })
+      const result: VoteResult = { kind: 'entryNotFound' }
+      return Response.json(result, { status: 404 })
     }
 
     const entry = state.queue[entryIndex]!
     const votes = await this.getVotes()
-    const result = applyVote(entry, votes, voterId, direction as 1 | -1 | 0)
+    const voteResult = applyVote(entry, votes, voterId, direction as 1 | -1 | 0)
 
-    state.queue[entryIndex] = result.entry
+    state.queue[entryIndex] = voteResult.entry
     state.queue = sortQueue(state.queue)
 
     await this.saveQueueState(state)
-    await this.saveVotes(result.votes)
+    await this.saveVotes(voteResult.votes)
 
     this.broadcastState()
-    return Response.json({ success: true, newVotes: result.entry.votes })
+    const result: VoteResult = { kind: 'voted', entryId, newVotes: voteResult.entry.votes }
+    return Response.json(result)
   }
 
   private async handleRemove(request: Request): Promise<Response> {
     const body = (await request.json()) as { entryId?: string }
     const { entryId } = body
-    const isAdmin = request.headers.get('X-Admin') === 'true'
+    const isAdmin = await this.isAdminRequest(request)
     const userName = request.headers.get('X-User-Name')
 
     if (!entryId) {
-      return Response.json({ error: 'Entry ID required' }, { status: 400 })
+      const result: RemoveResult = { kind: 'error', message: 'Entry ID required' }
+      return Response.json(result, { status: 400 })
     }
 
     const state = await this.getQueueState()
     const entry = state.queue.find((e) => e.id === entryId)
 
     if (!entry) {
-      return Response.json({ error: 'Entry not found' }, { status: 404 })
+      const result: RemoveResult = { kind: 'entryNotFound' }
+      return Response.json(result, { status: 404 })
     }
 
     if (!canRemoveEntry(entry, isAdmin, userName)) {
-      return Response.json({ error: 'Unauthorized' }, { status: 401 })
+      const result: RemoveResult = { kind: 'unauthorized' }
+      return Response.json(result, { status: 401 })
     }
 
     const newState = removeFromQueue(state, entryId)
     if (!newState) {
-      return Response.json({ error: 'Entry not found' }, { status: 404 })
+      const result: RemoveResult = { kind: 'entryNotFound' }
+      return Response.json(result, { status: 404 })
     }
 
     const votes = await this.getVotes()
@@ -696,28 +896,27 @@ export class RoomDO implements DurableObject {
     await this.saveVotes(votes)
 
     this.broadcastState()
-    return Response.json({ success: true })
+    const result: RemoveResult = { kind: 'removed', entryId }
+    return Response.json(result)
   }
 
   private async handleSkip(request: Request): Promise<Response> {
-    const isAdmin = request.headers.get('X-Admin') === 'true'
+    const isAdmin = await this.isAdminRequest(request)
     const userName = request.headers.get('X-User-Name')
 
     const state = await this.getQueueState()
 
     if (!canSkipCurrent(state.nowPlaying, isAdmin, userName)) {
       if (!state.nowPlaying) {
-        return Response.json({ error: 'Nothing is playing' }, { status: 400 })
+        const result: SkipResult = { kind: 'nothingPlaying' }
+        return Response.json(result, { status: 400 })
       }
-      return Response.json({ error: 'Unauthorized' }, { status: 401 })
+      const result: SkipResult = { kind: 'unauthorized' }
+      return Response.json(result, { status: 401 })
     }
 
-    // Record as skipped performance
-    if (state.nowPlaying) {
-      await this.recordPerformance(state.nowPlaying, false)
-    }
-
-    return this.doAdvanceQueueHttp(state)
+    const skippedBy = isAdmin ? 'admin' : 'singer' as const
+    return this.doAdvanceQueueHttpSkip(state, skippedBy)
   }
 
   private async handleNext(request: Request): Promise<Response> {
@@ -733,93 +932,79 @@ export class RoomDO implements DurableObject {
     const actualId = state.nowPlaying?.id ?? null
 
     if (expectedId !== actualId) {
-      return Response.json({ success: false, reason: 'state_mismatch', nowPlaying: state.nowPlaying })
+      const result: NextResult = { kind: 'stateMismatch', nowPlaying: state.nowPlaying }
+      return Response.json(result)
     }
 
-    // Record as completed performance (song finished normally)
-    let firstSong = false
-    if (state.nowPlaying) {
-      const result = await this.recordPerformance(state.nowPlaying, true)
-      firstSong = result.firstSong
-    }
-
-    return this.doAdvanceQueueHttp(state, firstSong)
+    return this.doAdvanceQueueHttpNext(state)
   }
 
-  private async doAdvanceQueueHttp(state: QueueState, firstSong = false): Promise<Response> {
-    const { state: newState, completed } = advanceQueue(state)
-
-    if (completed) {
-      const votes = await this.getVotes()
-      delete votes[completed.id]
-      await this.saveVotes(votes)
-    }
-
-    await this.saveQueueState(newState)
-    this.broadcastState()
-    return Response.json({
-      success: true,
+  private async doAdvanceQueueHttpNext(state: QueueState): Promise<Response> {
+    const { newState, firstSong } = await this.doAdvanceQueueCore(state, { kind: 'completed' })
+    const result: NextResult = {
+      kind: 'advanced',
       nowPlaying: newState.nowPlaying,
       currentEpoch: newState.currentEpoch,
-      firstSong, // Tell UI to show PIN prompt if this was their first completed song
-    })
+      firstSong,
+    }
+    return Response.json(result)
+  }
+
+  private async doAdvanceQueueHttpSkip(state: QueueState, skippedBy: 'singer' | 'admin'): Promise<Response> {
+    const { newState } = await this.doAdvanceQueueCore(state, { kind: 'skipped', by: skippedBy })
+    const result: SkipResult = {
+      kind: 'skipped',
+      nowPlaying: newState.nowPlaying,
+      currentEpoch: newState.currentEpoch,
+    }
+    return Response.json(result)
   }
 
   private async handleReorder(request: Request): Promise<Response> {
-    const isAdmin = request.headers.get('X-Admin') === 'true'
+    const isAdmin = await this.isAdminRequest(request)
     if (!isAdmin) {
-      return Response.json({ error: 'Unauthorized' }, { status: 401 })
+      const result: ReorderResult = { kind: 'unauthorized' }
+      return Response.json(result, { status: 401 })
     }
 
     const body = (await request.json()) as { entryId?: string; newEpoch?: number; newPosition?: number }
     const { entryId, newEpoch, newPosition } = body
 
     if (!entryId) {
-      return Response.json({ error: 'Entry ID required' }, { status: 400 })
+      const result: ReorderResult = { kind: 'error', message: 'Entry ID required' }
+      return Response.json(result, { status: 400 })
     }
 
     const state = await this.getQueueState()
-    const entryIndex = state.queue.findIndex((e) => e.id === entryId)
-
-    if (entryIndex === -1) {
-      return Response.json({ error: 'Entry not found' }, { status: 404 })
-    }
-
-    const entry = state.queue[entryIndex]!
 
     if (typeof newEpoch === 'number') {
-      entry.epoch = newEpoch
-    }
-
-    if (typeof newPosition === 'number') {
-      state.queue.splice(entryIndex, 1)
-      const targetIndex = Math.min(Math.max(0, newPosition), state.queue.length)
-      state.queue.splice(targetIndex, 0, entry)
-
-      if (targetIndex > 0) {
-        const prevEntry = state.queue[targetIndex - 1]
-        if (prevEntry) {
-          entry.epoch = prevEntry.epoch
-          entry.joinedAt = prevEntry.joinedAt - 1
-        }
-      } else if (state.queue.length > 1) {
-        const nextEntry = state.queue[1]
-        if (nextEntry) {
-          entry.epoch = nextEntry.epoch
-          entry.joinedAt = nextEntry.joinedAt - 1
-        }
+      const entry = state.queue.find((e) => e.id === entryId)
+      if (!entry) {
+        const result: ReorderResult = { kind: 'entryNotFound' }
+        return Response.json(result, { status: 404 })
       }
-    } else {
+      entry.epoch = newEpoch
       state.queue = sortQueue(state.queue)
+    } else if (typeof newPosition === 'number') {
+      const newQueue = reorderEntry(state.queue, entryId, newPosition)
+      if (!newQueue) {
+        const result: ReorderResult = { kind: 'entryNotFound' }
+        return Response.json(result, { status: 404 })
+      }
+      state.queue = newQueue
+    } else {
+      const result: ReorderResult = { kind: 'error', message: 'newEpoch or newPosition required' }
+      return Response.json(result, { status: 400 })
     }
 
     await this.saveQueueState(state)
     this.broadcastState()
-    return Response.json({ success: true, queue: state.queue })
+    const result: ReorderResult = { kind: 'reordered', queue: state.queue }
+    return Response.json(result)
   }
 
   private async handleAdminAdd(request: Request): Promise<Response> {
-    const isAdmin = request.headers.get('X-Admin') === 'true'
+    const isAdmin = await this.isAdminRequest(request)
     if (!isAdmin) {
       return Response.json({ error: 'Unauthorized' }, { status: 401 })
     }
@@ -858,7 +1043,8 @@ export class RoomDO implements DurableObject {
     const query = url.searchParams.get('q')
 
     if (!query || query.trim() === '') {
-      return Response.json({ error: 'Query required' }, { status: 400 })
+      const result: SearchQueryResult = { kind: 'error', message: 'Query required' }
+      return Response.json(result, { status: 400 })
     }
 
     try {
@@ -874,15 +1060,18 @@ export class RoomDO implements DurableObject {
       })
 
       if (!response.ok) {
-        return Response.json({ error: 'Search failed' }, { status: 502 })
+        const result: SearchQueryResult = { kind: 'error', message: 'Search failed' }
+        return Response.json(result, { status: 502 })
       }
 
       const data: unknown = await response.json()
       const videos = parseSearchResponse(data)
 
-      return Response.json({ results: videos })
+      const result: SearchQueryResult = { kind: 'results', results: videos }
+      return Response.json(result)
     } catch {
-      return Response.json({ error: 'Search request failed' }, { status: 502 })
+      const result: SearchQueryResult = { kind: 'error', message: 'Search request failed' }
+      return Response.json(result, { status: 502 })
     }
   }
 
@@ -939,20 +1128,12 @@ export class RoomDO implements DurableObject {
     const limitParam = url.searchParams.get('limit')
     const limit = Math.min(Math.max(1, parseInt(limitParam ?? '20', 10) || 20), 100)
 
-    // Get all songs from storage
-    const allKeys = await this.state.storage.list<Song>({ prefix: 'song:' })
-    const songs: Song[] = []
+    // Derive from performance history
+    const performances = await this.getPerformances()
+    const songs = getPopularSongs(performances, limit)
 
-    for (const [, song] of allKeys) {
-      songs.push(song)
-    }
-
-    // Sort by popularity
-    songs.sort((a, b) => calculatePopularity(b) - calculatePopularity(a))
-
-    return Response.json({
-      songs: songs.slice(0, limit),
-    })
+    const result: PopularSongsResult = { kind: 'songs', songs }
+    return Response.json(result)
   }
 
   private async handleClaim(request: Request): Promise<Response> {
@@ -960,10 +1141,12 @@ export class RoomDO implements DurableObject {
     const { name, pin } = body
 
     if (!name || name.trim() === '') {
-      return Response.json({ error: 'Name required' }, { status: 400 })
+      const result: ClaimResult = { kind: 'error', message: 'Name required' }
+      return Response.json(result, { status: 400 })
     }
     if (!pin || !isValidPin(pin)) {
-      return Response.json({ error: 'PIN must be 6 digits' }, { status: 400 })
+      const result: ClaimResult = { kind: 'invalidPin', reason: 'PIN must be 6 digits' }
+      return Response.json(result, { status: 400 })
     }
 
     const trimmedName = name.trim()
@@ -971,7 +1154,8 @@ export class RoomDO implements DurableObject {
     // Check if already claimed
     const existing = await this.getIdentity(trimmedName)
     if (existing) {
-      return Response.json({ error: 'Name already claimed' }, { status: 409 })
+      const result: ClaimResult = { kind: 'alreadyClaimed' }
+      return Response.json(result, { status: 409 })
     }
 
     // Create identity
@@ -986,7 +1170,8 @@ export class RoomDO implements DurableObject {
 
     await this.saveIdentity(trimmedName, identity)
 
-    return Response.json({ success: true })
+    const result: ClaimResult = { kind: 'claimed' }
+    return Response.json(result)
   }
 
   private async handleVerify(request: Request): Promise<Response> {
@@ -994,25 +1179,30 @@ export class RoomDO implements DurableObject {
     const { name, pin } = body
 
     if (!name || name.trim() === '') {
-      return Response.json({ error: 'Name required' }, { status: 400 })
+      const result: VerifyResult = { kind: 'error', message: 'Name required' }
+      return Response.json(result, { status: 400 })
     }
     if (!pin) {
-      return Response.json({ error: 'PIN required' }, { status: 400 })
+      const result: VerifyResult = { kind: 'error', message: 'PIN required' }
+      return Response.json(result, { status: 400 })
     }
 
     const trimmedName = name.trim()
 
     const identity = await this.getIdentity(trimmedName)
     if (!identity) {
-      return Response.json({ error: 'Name not found' }, { status: 404 })
+      const result: VerifyResult = { kind: 'nameNotFound' }
+      return Response.json(result, { status: 404 })
     }
 
     const valid = await verifyPin(pin, identity.salt, identity.pinHash)
     if (!valid) {
-      return Response.json({ error: 'Invalid PIN' }, { status: 401 })
+      const result: VerifyResult = { kind: 'invalidPin' }
+      return Response.json(result, { status: 401 })
     }
 
-    return Response.json({ success: true, name: identity.name })
+    const result: VerifyResult = { kind: 'verified', name: identity.name }
+    return Response.json(result)
   }
 
   private async handleGetIdentity(name: string): Promise<Response> {
@@ -1022,5 +1212,133 @@ export class RoomDO implements DurableObject {
 
     const identity = await this.getIdentity(name)
     return Response.json({ claimed: identity !== null })
+  }
+
+  // =========================================================================
+  // Room Management Endpoints
+  // =========================================================================
+
+  private async handleCheckRoom(): Promise<Response> {
+    const config = await this.getRoomConfig()
+    if (!config) {
+      const result: CheckRoomResult = { kind: 'notFound' }
+      return Response.json(result)
+    }
+    const result: CheckRoomResult = { kind: 'exists', config }
+    return Response.json(result)
+  }
+
+  private async handleCreateRoom(request: Request): Promise<Response> {
+    const body = (await request.json()) as {
+      roomId?: string
+      displayName?: string
+      pin?: string
+    }
+    const { roomId, displayName, pin } = body
+
+    if (!roomId) {
+      const result: CreateRoomResult = { kind: 'invalidRoomId', reason: 'Room ID required' }
+      return Response.json(result, { status: 400 })
+    }
+
+    // Validate room ID format: 2-30 chars, lowercase alphanumeric + hyphens
+    if (!/^[a-z0-9][a-z0-9-]{0,28}[a-z0-9]$|^[a-z0-9]{1,2}$/.test(roomId)) {
+      const result: CreateRoomResult = {
+        kind: 'invalidRoomId',
+        reason: 'Room ID must be 2-30 characters, lowercase letters, numbers, and hyphens only (no leading/trailing hyphens)',
+      }
+      return Response.json(result, { status: 400 })
+    }
+
+    // Check reserved names
+    const reserved = new Set(['api', 'player', 'admin', 'shikashika'])
+    if (reserved.has(roomId)) {
+      const result: CreateRoomResult = {
+        kind: 'invalidRoomId',
+        reason: `"${roomId}" is a reserved name`,
+      }
+      return Response.json(result, { status: 400 })
+    }
+
+    // Validate PIN
+    if (!pin || !isValidPin(pin)) {
+      const result: CreateRoomResult = { kind: 'invalidPin', reason: 'PIN must be 6 digits' }
+      return Response.json(result, { status: 400 })
+    }
+
+    // Check if room already exists
+    const existingConfig = await this.getRoomConfig()
+    if (existingConfig) {
+      const result: CreateRoomResult = { kind: 'alreadyExists' }
+      return Response.json(result, { status: 409 })
+    }
+
+    // Create room config
+    const config: RoomConfig = {
+      id: roomId,
+      displayName: displayName?.trim() || roomId,
+      createdAt: Date.now(),
+      maxQueueSize: 50,
+      allowVoting: true,
+    }
+
+    // Create admin
+    const salt = generateSalt()
+    const pinHash = await hashPin(pin, salt)
+    const admin: RoomAdmin = {
+      pinHash,
+      salt,
+      createdAt: Date.now(),
+    }
+
+    await this.saveRoomConfig(config)
+    await this.saveRoomAdmin(admin)
+
+    const result: CreateRoomResult = { kind: 'created', roomId, config }
+    return Response.json(result)
+  }
+
+  private async handleGetConfig(): Promise<Response> {
+    const config = await this.getRoomConfig()
+    if (!config) {
+      return Response.json({ error: 'Room not found' }, { status: 404 })
+    }
+    return Response.json(config)
+  }
+
+  private async handleAdminVerify(request: Request): Promise<Response> {
+    // Rate limit PIN attempts
+    const clientId = this.getClientId(request)
+    if (this.checkPinRateLimit(clientId)) {
+      const result: AdminVerifyResult = { kind: 'error', message: 'Too many attempts. Try again in 1 minute.' }
+      return Response.json(result, { status: 429 })
+    }
+
+    const body = (await request.json()) as { pin?: string }
+    const { pin } = body
+
+    if (!pin) {
+      const result: AdminVerifyResult = { kind: 'error', message: 'PIN required' }
+      return Response.json(result, { status: 400 })
+    }
+
+    const admin = await this.getRoomAdmin()
+    if (!admin) {
+      const result: AdminVerifyResult = { kind: 'roomNotFound' }
+      return Response.json(result, { status: 404 })
+    }
+
+    const valid = await verifyPin(pin, admin.salt, admin.pinHash)
+    if (!valid) {
+      const result: AdminVerifyResult = { kind: 'invalidPin' }
+      return Response.json(result, { status: 401 })
+    }
+
+    // Success - clear rate limit for this client
+    this.pinRateLimits.delete(clientId)
+
+    const session = this.createAdminSession()
+    const result: AdminVerifyResult = { kind: 'verified', token: session.token }
+    return Response.json(result)
   }
 }

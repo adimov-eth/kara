@@ -27,8 +27,8 @@
 
     isSearching = false;
 
-    if (response.error) {
-      errorMsg = response.error;
+    if (response.kind === 'error') {
+      errorMsg = response.message;
       return;
     }
 
@@ -88,15 +88,18 @@
           onclick={() => selectResult(result)}
           disabled={isTooLong(result)}
         >
-          <img class="result-thumb" src={result.thumbnail} alt="" loading="lazy" />
+          <div class="result-thumb-wrapper">
+            <img class="result-thumb" src={result.thumbnail} alt="" loading="lazy" />
+            <span class="result-duration" class:too-long-badge={isTooLong(result)}>
+              {result.duration}
+            </span>
+          </div>
           <div class="result-info">
             <div class="result-title">{result.title}</div>
-            <div class="result-meta">
-              <span>{result.channel}</span>
-              <span class="result-duration" class:too-long-text={isTooLong(result)}>
-                {result.duration}{#if isTooLong(result)} (too long){/if}
-              </span>
-            </div>
+            <div class="result-channel">{result.channel}</div>
+            {#if isTooLong(result)}
+              <div class="too-long-msg">Too long (max 7 min)</div>
+            {/if}
           </div>
         </button>
       {/each}
@@ -126,35 +129,15 @@
 
   .search-results {
     display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
     gap: 12px;
     margin-top: 16px;
-    max-height: 400px;
-    overflow-y: auto;
-    scrollbar-width: thin;
-    scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
-  }
-
-  .search-results::-webkit-scrollbar {
-    width: 6px;
-  }
-
-  .search-results::-webkit-scrollbar-track {
-    background: transparent;
-  }
-
-  .search-results::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.2);
-    border-radius: 3px;
-  }
-
-  .search-results::-webkit-scrollbar-thumb:hover {
-    background: rgba(255, 255, 255, 0.3);
   }
 
   .search-result {
     display: flex;
-    gap: 12px;
-    padding: 12px;
+    flex-direction: column;
+    padding: 0;
     background: rgba(255, 255, 255, 0.03);
     border: 2px solid transparent;
     border-radius: 12px;
@@ -163,12 +146,13 @@
     text-align: left;
     color: inherit;
     font-family: inherit;
-    width: 100%;
+    overflow: hidden;
   }
 
   .search-result:hover:not(:disabled) {
     background: rgba(255, 255, 255, 0.06);
     border-color: rgba(255, 255, 255, 0.1);
+    transform: translateY(-2px);
   }
 
   .search-result.selected {
@@ -184,47 +168,69 @@
   .search-result.too-long:hover {
     background: rgba(255, 255, 255, 0.03);
     border-color: transparent;
+    transform: none;
+  }
+
+  .result-thumb-wrapper {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 16 / 9;
   }
 
   .result-thumb {
-    width: 80px;
-    height: 45px;
-    border-radius: 6px;
+    width: 100%;
+    height: 100%;
     object-fit: cover;
-    flex-shrink: 0;
     background: rgba(0, 0, 0, 0.3);
   }
 
+  .result-duration {
+    position: absolute;
+    bottom: 6px;
+    right: 6px;
+    background: rgba(0, 0, 0, 0.8);
+    color: white;
+    font-size: 0.7rem;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 4px;
+  }
+
+  .result-duration.too-long-badge {
+    background: var(--warning);
+    color: black;
+  }
+
   .result-info {
-    flex: 1;
-    min-width: 0;
+    padding: 10px;
     display: flex;
     flex-direction: column;
-    justify-content: center;
+    gap: 4px;
   }
 
   .result-title {
-    font-size: 0.9rem;
+    font-size: 0.85rem;
     font-weight: 500;
+    line-height: 1.3;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .result-channel {
+    font-size: 0.75rem;
+    color: var(--text-muted);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    margin-bottom: 4px;
   }
 
-  .result-meta {
-    font-size: 0.8rem;
-    color: var(--text-muted);
-    display: flex;
-    gap: 8px;
-  }
-
-  .result-duration {
-    color: var(--cyan);
-  }
-
-  .result-duration.too-long-text {
+  .too-long-msg {
+    font-size: 0.7rem;
     color: var(--warning);
+    font-weight: 500;
   }
 
   .searching-indicator {
@@ -241,5 +247,21 @@
     text-align: center;
     padding: 24px;
     color: var(--text-muted);
+  }
+
+  /* Mobile: 2 columns */
+  @media (max-width: 480px) {
+    .search-results {
+      grid-template-columns: repeat(2, 1fr);
+      gap: 8px;
+    }
+
+    .result-info {
+      padding: 8px;
+    }
+
+    .result-title {
+      font-size: 0.8rem;
+    }
   }
 </style>

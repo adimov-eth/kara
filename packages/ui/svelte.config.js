@@ -10,7 +10,7 @@ const config = {
       assets: 'dist',
       fallback: undefined,
       precompress: false,
-      strict: true
+      strict: false
     }),
     paths: {
       base: ''

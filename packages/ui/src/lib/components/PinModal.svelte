@@ -48,12 +48,20 @@
 
     isSubmitting = false;
 
-    if (!result.success) {
-      error = result.error ?? 'Failed to claim name';
-      return;
+    switch (result.kind) {
+      case 'claimed':
+        onSuccess?.();
+        break;
+      case 'alreadyClaimed':
+        error = 'This name is already claimed';
+        break;
+      case 'invalidPin':
+        error = result.reason;
+        break;
+      case 'error':
+        error = result.message;
+        break;
     }
-
-    onSuccess?.();
   }
 
   async function handleVerify() {
@@ -69,12 +77,20 @@
 
     isSubmitting = false;
 
-    if (!result.success) {
-      error = result.error ?? 'Invalid PIN';
-      return;
+    switch (result.kind) {
+      case 'verified':
+        onSuccess?.();
+        break;
+      case 'nameNotFound':
+        error = 'Name not found';
+        break;
+      case 'invalidPin':
+        error = 'Invalid PIN';
+        break;
+      case 'error':
+        error = result.message;
+        break;
     }
-
-    onSuccess?.();
   }
 </script>
 

@@ -9,6 +9,7 @@ export {
   removeFromQueue,
   canRemoveEntry,
   canSkipCurrent,
+  reorderEntry,
 } from './queue.js'
 
 // YouTube utilities
@@ -23,8 +24,7 @@ export {
 // Performance tracking
 export {
   createPerformance,
-  updateSongStats,
-  calculatePopularity,
+  getPopularSongs,
   isFirstPerformance,
   getPerformanceHistory,
   calculateSingerStats,

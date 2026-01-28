@@ -40,6 +40,10 @@
     border-color: rgba(255, 107, 157, 0.3);
   }
 
+  .toast.info {
+    border-color: rgba(78, 205, 196, 0.3);
+  }
+
   @keyframes slideUp {
     from {
       opacity: 0;

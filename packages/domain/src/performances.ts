@@ -1,4 +1,4 @@
-import type { Entry, Performance, Song } from '@karaoke/types'
+import type { Entry, Performance, PerformanceOutcome, SongStats } from '@karaoke/types'
 
 /**
  * Create a performance record from a completed/skipped entry
@@ -6,7 +6,7 @@ import type { Entry, Performance, Song } from '@karaoke/types'
  */
 export function createPerformance(
   entry: Entry,
-  completed: boolean,
+  outcome: PerformanceOutcome,
   id: string,
   timestamp: number
 ): Performance {
@@ -17,65 +17,36 @@ export function createPerformance(
     title: entry.title,
     performedAt: timestamp,
     votes: entry.votes,
-    completed,
+    outcome,
   }
 }
 
 /**
- * Update song statistics with a new performance
- * Pure function - returns new Song object
+ * Get popular songs derived from performance history
+ * Ranked by play count (demand signal, not votes)
  */
-export function updateSongStats(
-  existing: Song | null,
-  performance: Performance
-): Song {
-  if (!existing) {
-    // First play of this song
-    return {
-      videoId: performance.videoId,
-      title: performance.title,
-      timesPlayed: 1,
-      timesCompleted: performance.completed ? 1 : 0,
-      totalVotes: performance.votes,
-      avgVotes: performance.votes,
-      completionRate: performance.completed ? 1 : 0,
-      lastPlayedAt: performance.performedAt,
-      firstPlayedAt: performance.performedAt,
+export function getPopularSongs(
+  performances: readonly Performance[],
+  limit: number
+): SongStats[] {
+  const counts = new Map<string, SongStats>()
+
+  for (const p of performances) {
+    const existing = counts.get(p.videoId)
+    if (existing) {
+      counts.set(p.videoId, { ...existing, playCount: existing.playCount + 1 })
+    } else {
+      counts.set(p.videoId, { videoId: p.videoId, title: p.title, playCount: 1 })
     }
   }
 
-  const timesPlayed = existing.timesPlayed + 1
-  const timesCompleted = existing.timesCompleted + (performance.completed ? 1 : 0)
-  const totalVotes = existing.totalVotes + performance.votes
-
-  return {
-    videoId: existing.videoId,
-    title: performance.title, // Use latest title in case it changed
-    timesPlayed,
-    timesCompleted,
-    totalVotes,
-    avgVotes: totalVotes / timesPlayed,
-    completionRate: timesCompleted / timesPlayed,
-    lastPlayedAt: performance.performedAt,
-    firstPlayedAt: existing.firstPlayedAt,
-  }
+  return [...counts.values()]
+    .sort((a, b) => b.playCount - a.playCount)
+    .slice(0, limit)
 }
 
 /**
- * Calculate popularity score for a song
- * Used for ranking songs in the library
- * Formula: (timesPlayed * 0.3) + (avgVotes * 0.5) + (completionRate * 10 * 0.2)
- */
-export function calculatePopularity(song: Song): number {
-  return (
-    song.timesPlayed * 0.3 +
-    song.avgVotes * 0.5 +
-    song.completionRate * 10 * 0.2
-  )
-}
-
-/**
- * Check if this is the first performance for a given name
+ * Check if this is the first completed performance for a given name
  */
 export function isFirstPerformance(
   performances: readonly Performance[],
@@ -83,7 +54,7 @@ export function isFirstPerformance(
 ): boolean {
   const nameLower = name.toLowerCase()
   return !performances.some(
-    (p) => p.name.toLowerCase() === nameLower && p.completed
+    (p) => p.name.toLowerCase() === nameLower && p.outcome.kind === 'completed'
   )
 }
 
@@ -115,6 +86,6 @@ export function calculateSingerStats(
   return {
     totalSongs: userPerformances.length,
     totalVotes: userPerformances.reduce((sum, p) => sum + p.votes, 0),
-    completedSongs: userPerformances.filter((p) => p.completed).length,
+    completedSongs: userPerformances.filter((p) => p.outcome.kind === 'completed').length,
   }
 }

@@ -182,3 +182,41 @@ export function canSkipCurrent(
   if (!userName) return false
   return nowPlaying.name.toLowerCase() === userName.toLowerCase()
 }
+
+/**
+ * Reorder an entry to a specific position in the queue
+ * Adjusts epoch and joinedAt to maintain position after sort
+ * Pure function - returns new queue
+ */
+export function reorderEntry(
+  queue: readonly Entry[],
+  entryId: string,
+  newPosition: number
+): Entry[] | null {
+  const entryIndex = queue.findIndex((e) => e.id === entryId)
+  if (entryIndex === -1) return null
+
+  const newQueue = [...queue]
+  const entry = { ...newQueue[entryIndex]! }
+  newQueue.splice(entryIndex, 1)
+
+  const targetIndex = Math.min(Math.max(0, newPosition), newQueue.length)
+  newQueue.splice(targetIndex, 0, entry)
+
+  // Adjust epoch/joinedAt to maintain position
+  if (targetIndex > 0) {
+    const prevEntry = newQueue[targetIndex - 1]
+    if (prevEntry) {
+      entry.epoch = prevEntry.epoch
+      entry.joinedAt = prevEntry.joinedAt - 1
+    }
+  } else if (newQueue.length > 1) {
+    const nextEntry = newQueue[1]
+    if (nextEntry) {
+      entry.epoch = nextEntry.epoch
+      entry.joinedAt = nextEntry.joinedAt - 1
+    }
+  }
+
+  return newQueue
+}

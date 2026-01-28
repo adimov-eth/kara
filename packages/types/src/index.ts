@@ -1,4 +1,38 @@
-// Core queue entry
+// =============================================================================
+// Branded Types - Prevent mixing different ID/primitive types
+// =============================================================================
+
+type Brand<K, T> = K & { readonly __brand: T }
+
+export type EntryId = Brand<string, 'EntryId'>
+export type VoterId = Brand<string, 'VoterId'>
+export type VideoId = Brand<string, 'VideoId'>
+export type RoomId = Brand<string, 'RoomId'>
+export type AdminToken = Brand<string, 'AdminToken'>
+export type Timestamp = Brand<number, 'Timestamp'>
+export type Epoch = Brand<number, 'Epoch'>
+
+// Type constructors (cast at boundaries, use branded types internally)
+export const EntryId = (s: string): EntryId => s as EntryId
+export const VoterId = (s: string): VoterId => s as VoterId
+export const VideoId = (s: string): VideoId => s as VideoId
+export const RoomId = (s: string): RoomId => s as RoomId
+export const AdminToken = (s: string): AdminToken => s as AdminToken
+export const Timestamp = (n: number): Timestamp => n as Timestamp
+export const Epoch = (n: number): Epoch => n as Epoch
+
+// =============================================================================
+// Exhaustiveness Helper
+// =============================================================================
+
+export function assertNever(x: never): never {
+  throw new Error(`Unexpected value: ${JSON.stringify(x)}`)
+}
+
+// =============================================================================
+// Core Queue Entry
+// =============================================================================
+
 export interface Entry {
   id: string
   name: string
@@ -45,6 +79,11 @@ export interface VoteRecord {
 // Performances & Song Library
 // =============================================================================
 
+export type PerformanceOutcome =
+  | { kind: 'completed' }
+  | { kind: 'skipped'; by: 'singer' | 'admin' }
+  | { kind: 'errored'; reason: string }
+
 export interface Performance {
   id: string              // unique id
   name: string            // singer name
@@ -52,19 +91,25 @@ export interface Performance {
   title: string           // song title
   performedAt: number     // timestamp (Date.now())
   votes: number           // final vote count when song ended
-  completed: boolean      // true = finished, false = skipped/bailed
+  outcome: PerformanceOutcome
 }
 
-export interface Song {
+// Legacy performance format (for storage migration)
+export interface LegacyPerformance {
+  id: string
+  name: string
   videoId: string
   title: string
-  timesPlayed: number     // total performances
-  timesCompleted: number  // performances where completed=true
-  totalVotes: number      // sum of all votes received
-  avgVotes: number        // totalVotes / timesPlayed
-  completionRate: number  // timesCompleted / timesPlayed
-  lastPlayedAt: number    // most recent performance timestamp
-  firstPlayedAt: number   // first ever performance timestamp
+  performedAt: number
+  votes: number
+  completed: boolean
+}
+
+// Song stats derived from Performance log (not stored separately)
+export interface SongStats {
+  videoId: string
+  title: string
+  playCount: number
 }
 
 // =============================================================================
@@ -76,6 +121,30 @@ export interface Identity {
   pinHash: string         // hex string of SHA-256(salt + pin)
   salt: string            // random 16-byte hex string
   createdAt: number       // timestamp
+}
+
+// =============================================================================
+// Room Configuration & Admin
+// =============================================================================
+
+export interface RoomConfig {
+  id: string              // room ID (e.g., "bobs-party")
+  displayName: string     // display name (e.g., "Bob's Birthday Karaoke")
+  createdAt: number       // timestamp
+  maxQueueSize: number    // default: 50
+  allowVoting: boolean    // default: true
+}
+
+export interface RoomAdmin {
+  pinHash: string         // SHA-256(salt + pin)
+  salt: string            // random 16-byte hex string
+  createdAt: number       // timestamp
+}
+
+export interface AdminSession {
+  token: string           // random 64-char hex
+  createdAt: number       // timestamp
+  expiresAt: number       // timestamp (4 hours from creation)
 }
 
 // Search result from YouTube or Spotify
@@ -99,29 +168,116 @@ export type ExtensionMessage =
   | { kind: 'ended'; videoId: string }
   | { kind: 'error'; videoId: string; reason: string }
 
-// API request/response types
+// =============================================================================
+// API Result Types (Discriminated Unions)
+// =============================================================================
+
+// Join queue result
+export type JoinResult =
+  | { kind: 'joined'; entry: Entry; position: number }
+  | { kind: 'requiresPin' }
+  | { kind: 'alreadyInQueue'; name: string }
+  | { kind: 'invalidVideo'; reason: string }
+  | { kind: 'error'; message: string }
+
+// Vote result
+export type VoteResult =
+  | { kind: 'voted'; entryId: string; newVotes: number }
+  | { kind: 'entryNotFound' }
+  | { kind: 'error'; message: string }
+
+// Remove entry result
+export type RemoveResult =
+  | { kind: 'removed'; entryId: string }
+  | { kind: 'entryNotFound' }
+  | { kind: 'unauthorized' }
+  | { kind: 'error'; message: string }
+
+// Skip song result
+export type SkipResult =
+  | { kind: 'skipped'; nowPlaying: Entry | null; currentEpoch: number }
+  | { kind: 'nothingPlaying' }
+  | { kind: 'unauthorized' }
+  | { kind: 'error'; message: string }
+
+// Advance queue result (next song)
+export type NextResult =
+  | { kind: 'advanced'; nowPlaying: Entry | null; currentEpoch: number; firstSong: boolean }
+  | { kind: 'stateMismatch'; nowPlaying: Entry | null }
+  | { kind: 'error'; message: string }
+
+// Claim name result
+export type ClaimResult =
+  | { kind: 'claimed' }
+  | { kind: 'alreadyClaimed' }
+  | { kind: 'invalidPin'; reason: string }
+  | { kind: 'error'; message: string }
+
+// Verify PIN result
+export type VerifyResult =
+  | { kind: 'verified'; name: string }
+  | { kind: 'nameNotFound' }
+  | { kind: 'invalidPin' }
+  | { kind: 'error'; message: string }
+
+// Search result (success/failure)
+export type SearchQueryResult =
+  | { kind: 'results'; results: SearchResult[] }
+  | { kind: 'error'; message: string }
+
+// Reorder result (admin)
+export type ReorderResult =
+  | { kind: 'reordered'; queue: Entry[] }
+  | { kind: 'entryNotFound' }
+  | { kind: 'unauthorized' }
+  | { kind: 'error'; message: string }
+
+// Popular songs result
+export type PopularSongsResult =
+  | { kind: 'songs'; songs: SongStats[] }
+  | { kind: 'error'; message: string }
+
+// Create room result
+export type CreateRoomResult =
+  | { kind: 'created'; roomId: string; config: RoomConfig }
+  | { kind: 'alreadyExists' }
+  | { kind: 'invalidRoomId'; reason: string }
+  | { kind: 'invalidPin'; reason: string }
+  | { kind: 'error'; message: string }
+
+// Check room existence result
+export type CheckRoomResult =
+  | { kind: 'exists'; config: RoomConfig }
+  | { kind: 'notFound' }
+  | { kind: 'error'; message: string }
+
+// Admin verify result
+export type AdminVerifyResult =
+  | { kind: 'verified'; token: string }
+  | { kind: 'invalidPin' }
+  | { kind: 'roomNotFound' }
+  | { kind: 'error'; message: string }
+
+// Admin token validation (internal)
+export type AdminTokenResult =
+  | { kind: 'valid' }
+  | { kind: 'invalid' }
+  | { kind: 'expired' }
+
+// =============================================================================
+// API Request Types
+// =============================================================================
+
 export interface JoinRequest {
   name: string
   videoId: string
   title: string
-}
-
-export interface JoinResponse {
-  success: boolean
-  entry?: Entry
-  position?: number
-  error?: string
+  verified?: boolean
 }
 
 export interface VoteRequest {
   entryId: string
   direction: 1 | -1 | 0
-}
-
-export interface VoteResponse {
-  success: boolean
-  newVotes?: number
-  error?: string
 }
 
 export interface RemoveRequest {
@@ -130,13 +286,6 @@ export interface RemoveRequest {
 
 export interface NextRequest {
   currentId?: string | null
-}
-
-export interface NextResponse {
-  success: boolean
-  reason?: string
-  nowPlaying: Entry | null
-  currentEpoch?: number
 }
 
 export interface ReorderRequest {

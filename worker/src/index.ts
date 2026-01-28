@@ -1,5 +1,5 @@
 import type { Env } from './env.js'
-import { GUEST_HTML, PLAYER_HTML, ADMIN_HTML } from './views/generated/index.js'
+import { GUEST_HTML, PLAYER_HTML, ADMIN_HTML, LANDING_HTML } from './views/generated/index.js'
 
 // Re-export RoomDO for Cloudflare to find it
 export { RoomDO } from './room.js'
@@ -7,10 +7,16 @@ export { RoomDO } from './room.js'
 const ADMIN_PATH = '/shikashika'
 const DEFAULT_ROOM_ID = 'default'
 
+// Reserved paths that cannot be room IDs
+const RESERVED_PATHS = new Set(['api', 'player', 'admin', 'shikashika'])
+
+// Room ID validation regex: 2-30 chars, lowercase alphanumeric + hyphens
+const ROOM_ID_REGEX = /^[a-z0-9][a-z0-9-]{0,28}[a-z0-9]$|^[a-z0-9]{1,2}$/
+
 const corsHeaders: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, X-Voter-Id, X-Admin, X-User-Name, Upgrade, Connection',
+  'Access-Control-Allow-Headers': 'Content-Type, X-Voter-Id, X-Admin, X-User-Name, Authorization, Upgrade, Connection',
 }
 
 function addCorsHeaders(response: Response): Response {
@@ -87,7 +93,7 @@ export default {
       }
     }
 
-    // View routes
+    // Legacy view routes (for backwards compatibility with default room)
     if (path === '/player') {
       return new Response(PLAYER_HTML, {
         headers: { 'Content-Type': 'text/html; charset=utf-8' },
@@ -100,9 +106,41 @@ export default {
       })
     }
 
-    // Default: guest view
-    return new Response(GUEST_HTML, {
-      headers: { 'Content-Type': 'text/html; charset=utf-8' },
-    })
+    // Room-scoped routes: /{roomId}, /{roomId}/player, /{roomId}/admin
+    const segments = path.split('/').filter(Boolean)
+    if (segments.length >= 1) {
+      const firstSegment = segments[0]!
+
+      // Check if it's a valid room ID (not reserved and matches format)
+      if (!RESERVED_PATHS.has(firstSegment) && ROOM_ID_REGEX.test(firstSegment)) {
+        const subPath = '/' + segments.slice(1).join('/')
+
+        if (subPath === '/') {
+          return new Response(GUEST_HTML, {
+            headers: { 'Content-Type': 'text/html; charset=utf-8' },
+          })
+        }
+        if (subPath === '/player') {
+          return new Response(PLAYER_HTML, {
+            headers: { 'Content-Type': 'text/html; charset=utf-8' },
+          })
+        }
+        if (subPath === '/admin') {
+          return new Response(ADMIN_HTML, {
+            headers: { 'Content-Type': 'text/html; charset=utf-8' },
+          })
+        }
+      }
+    }
+
+    // Root path: landing page for room entry
+    if (path === '/') {
+      return new Response(LANDING_HTML, {
+        headers: { 'Content-Type': 'text/html; charset=utf-8' },
+      })
+    }
+
+    // 404 for unrecognized paths
+    return new Response('Not found', { status: 404 })
   },
 }
