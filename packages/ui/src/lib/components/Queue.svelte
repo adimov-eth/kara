@@ -1,6 +1,8 @@
 <script lang="ts">
-  import type { Entry as EntryType } from '@karaoke/types';
-  import Entry from './Entry.svelte';
+  import type { Entry as EntryType } from "@karaoke/types";
+  import { flip } from "svelte/animate";
+  import { fly, fade } from "svelte/transition";
+  import Entry from "./Entry.svelte";
 
   interface Props {
     entries: EntryType[];
@@ -13,7 +15,7 @@
 
   let {
     entries,
-    myName = '',
+    myName = "",
     myVotes = {},
     readonly = false,
     onVote,
@@ -40,21 +42,29 @@
 
   {#if entries.length === 0}
     <div class="empty-state">
-      <div class="empty-icon">*</div>
-      <p>Queue is empty.<br>Be the first to add a song!</p>
+      <div class="empty-icon">🎤</div>
+      <h3>The stage is silent...</h3>
+      <p>Be the hero this party needs!</p>
+      <div class="arrow">↓</div>
     </div>
   {:else}
     <ul class="queue-list">
       {#each entries as entry, i (entry.id)}
-        <Entry
-          {entry}
-          position={i + 1}
-          myVote={getMyVote(entry.id)}
-          isMine={isMine(entry)}
-          {readonly}
-          onVote={(dir) => onVote?.(entry.id, dir)}
-          onRemove={() => onRemove?.(entry.id)}
-        />
+        <div
+          animate:flip={{ duration: 300 }}
+          in:fly={{ y: 20, duration: 300 }}
+          out:fade
+        >
+          <Entry
+            {entry}
+            position={i + 1}
+            myVote={getMyVote(entry.id)}
+            isMine={isMine(entry)}
+            {readonly}
+            onVote={(dir) => onVote?.(entry.id, dir)}
+            onRemove={() => onRemove?.(entry.id)}
+          />
+        </div>
       {/each}
     </ul>
   {/if}
@@ -96,13 +106,57 @@
 
   .empty-state {
     text-align: center;
-    padding: 48px 24px;
+    padding: 60px 24px;
     color: var(--text-muted);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
   }
 
   .empty-icon {
-    font-size: 3rem;
-    margin-bottom: 16px;
-    opacity: 0.5;
+    font-size: 4rem;
+    margin-bottom: 8px;
+    animation: bounce 2s infinite ease-in-out;
+  }
+
+  .empty-state h3 {
+    font-size: 1.25rem;
+    color: var(--text);
+    margin: 0;
+    font-weight: 700;
+  }
+
+  .empty-state p {
+    margin: 0;
+    font-size: 0.95rem;
+    opacity: 0.8;
+  }
+
+  .arrow {
+    font-size: 2rem;
+    color: var(--accent);
+    margin-top: 16px;
+    animation: float 1.5s infinite ease-in-out;
+  }
+
+  @keyframes bounce {
+    0%,
+    100% {
+      transform: scale(1);
+    }
+    50% {
+      transform: scale(1.1);
+    }
+  }
+
+  @keyframes float {
+    0%,
+    100% {
+      transform: translateY(0);
+    }
+    50% {
+      transform: translateY(10px);
+    }
   }
 </style>

@@ -1,19 +1,32 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
-  import type { SearchResult, QueueState, Entry } from '@karaoke/types';
-  import { createWebSocket, join, vote as voteApi, remove as removeApi, skip as skipApi } from '$lib';
-  import NowPlaying from '$lib/components/NowPlaying.svelte';
-  import Search from '$lib/components/Search.svelte';
-  import PopularSongs from '$lib/components/PopularSongs.svelte';
-  import Queue from '$lib/components/Queue.svelte';
-  import PinModal from '$lib/components/PinModal.svelte';
-  import { toastStore } from '$lib/stores/toast.svelte';
-  import HelpButton from '$lib/components/HelpButton.svelte';
+  import { onMount, onDestroy } from "svelte";
+  import type { SearchResult, QueueState, Entry } from "@karaoke/types";
+  import {
+    createWebSocket,
+    join,
+    vote as voteApi,
+    remove as removeApi,
+    skip as skipApi,
+  } from "$lib";
+  import { extractVideoId } from "@karaoke/domain";
+  import { safeJsonParse } from "$lib/utils";
+  import { vibrateSuccess, vibrateTap, vibrateError } from "$lib/haptics";
+  import NowPlaying from "$lib/components/NowPlaying.svelte";
+  import Search from "$lib/components/Search.svelte";
+  import PopularSongs from "$lib/components/PopularSongs.svelte";
+  import Queue from "$lib/components/Queue.svelte";
+  import PinModal from "$lib/components/PinModal.svelte";
+  import { toastStore } from "$lib/stores/toast.svelte";
+  import HelpButton from "$lib/components/HelpButton.svelte";
 
   // State
-  let room = $state<QueueState>({ queue: [], nowPlaying: null, currentEpoch: 0 });
-  let myName = $state('');
-  let voterId = $state('');
+  let room = $state<QueueState>({
+    queue: [],
+    nowPlaying: null,
+    currentEpoch: 0,
+  });
+  let myName = $state("");
+  let voterId = $state("");
   let myVotes = $state<Record<string, number>>({});
   let verifiedNames = $state<Record<string, boolean>>({});
 
@@ -25,15 +38,22 @@
   let joinError = $state<string | null>(null);
 
   // PIN modal state
-  let pinMode = $state<'claim' | 'verify' | 'closed'>('closed');
-  let pinName = $state('');
-  let pendingJoin = $state<{ name: string; url: string; title: string } | null>(null);
+  let pinMode = $state<"claim" | "verify" | "closed">("closed");
+  let pinName = $state("");
+  let pendingJoin = $state<{ name: string; url: string; title: string } | null>(
+    null,
+  );
+
+  // Cinematic Recap state
+  let showRecap = $state(false);
+  let recapVotes = $state(0);
 
   // YouTube validation
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let ytPlayer: any = null;
-  let validationStatus = $state<'idle' | 'checking' | 'valid' | 'invalid'>('idle');
-  let validationMsg = $state('');
+  let ytPlayer: YT.Player | null = null;
+  let validationStatus = $state<"idle" | "checking" | "valid" | "invalid">(
+    "idle",
+  );
+  let validationMsg = $state("");
 
   const MAX_DURATION = 420; // 7 minutes
 
@@ -44,37 +64,40 @@
   let previousEntry: Entry | null = null;
 
   // Derived
-  const myEntry = $derived(room.queue.find(e => e.name.toLowerCase() === myName.toLowerCase()));
-  const isMyTurn = $derived(room.nowPlaying?.name.toLowerCase() === myName.toLowerCase());
+  const myEntry = $derived(
+    room.queue.find((e) => e.name.toLowerCase() === myName.toLowerCase()),
+  );
+  const isMyTurn = $derived(
+    room.nowPlaying?.name.toLowerCase() === myName.toLowerCase(),
+  );
   const isInQueue = $derived(!!myEntry);
-  const myPosition = $derived(myEntry ? room.queue.findIndex(e => e.id === myEntry.id) + 1 : null);
+  const myPosition = $derived(
+    myEntry ? room.queue.findIndex((e) => e.id === myEntry.id) + 1 : null,
+  );
   const songsUntilTurn = $derived(myPosition);
   const canJoin = $derived(
-    myName.trim().length > 0 &&
-    validatedUrl &&
-    !isInQueue &&
-    !isMyTurn
+    myName.trim().length > 0 && validatedUrl && !isInQueue && !isMyTurn,
   );
 
   // Initialize
   onMount(() => {
     // Restore from localStorage
-    myName = localStorage.getItem('karaoke_name') ?? '';
-    voterId = localStorage.getItem('karaoke_voter_id') ?? crypto.randomUUID();
-    myVotes = JSON.parse(localStorage.getItem('karaoke_votes') ?? '{}');
-    verifiedNames = JSON.parse(localStorage.getItem('karaoke_verified') ?? '{}');
+    myName = localStorage.getItem("karaoke_name") ?? "";
+    voterId = localStorage.getItem("karaoke_voter_id") ?? crypto.randomUUID();
+    myVotes = safeJsonParse<Record<string, number>>(localStorage.getItem("karaoke_votes"), {});
+    verifiedNames = safeJsonParse<Record<string, boolean>>(localStorage.getItem("karaoke_verified"), {});
 
     // Save voterId
-    localStorage.setItem('karaoke_voter_id', voterId);
+    localStorage.setItem("karaoke_voter_id", voterId);
 
     // Connect WebSocket
     ws.onState(handleStateUpdate);
-    ws.connect('user');
+    ws.connect("user");
 
     // Load YouTube API
-    if (typeof window !== 'undefined' && !(window as any).YT) {
-      const tag = document.createElement('script');
-      tag.src = 'https://www.youtube.com/iframe_api';
+    if (typeof window !== "undefined" && !window.YT) {
+      const tag = document.createElement("script");
+      tag.src = "https://www.youtube.com/iframe_api";
       document.head.appendChild(tag);
     }
   });
@@ -87,8 +110,12 @@
     const nameLower = myName.toLowerCase();
 
     // Find my entry in new state
-    const newMyEntry = newState.queue.find(e => e.name.toLowerCase() === nameLower);
-    const newPosition = newMyEntry ? newState.queue.findIndex(e => e.id === newMyEntry.id) + 1 : null;
+    const newMyEntry = newState.queue.find(
+      (e) => e.name.toLowerCase() === nameLower,
+    );
+    const newPosition = newMyEntry
+      ? newState.queue.findIndex((e) => e.id === newMyEntry.id) + 1
+      : null;
 
     // Check if user's song just finished (was playing, now not)
     const wasPlaying = previousNowPlaying?.name.toLowerCase() === nameLower;
@@ -97,7 +124,12 @@
     if (wasPlaying && !isNowPlaying && myName) {
       // Song finished - show stats
       const finalVotes = previousEntry?.votes ?? 0;
-      const voteMsg = finalVotes > 0 ? `+${finalVotes}` : finalVotes === 0 ? '0' : `${finalVotes}`;
+      const voteMsg =
+        finalVotes > 0
+          ? `+${finalVotes}`
+          : finalVotes === 0
+            ? "0"
+            : `${finalVotes}`;
 
       const isVerified = verifiedNames[nameLower] === true;
       if (!isVerified) {
@@ -105,15 +137,24 @@
         // Show PIN claim modal after a beat
         setTimeout(() => {
           pinName = myName;
-          pinMode = 'claim';
+          pinMode = "claim";
         }, 1500);
       } else {
         toastStore.success(`You got ${voteMsg} votes! Add another?`);
       }
+
+      // Show cinematic recap
+      recapVotes = finalVotes;
+      showRecap = true;
+      setTimeout(() => (showRecap = false), 4000);
     }
 
     // Position change notifications (only if we were already in queue)
-    if (previousPosition !== null && newPosition !== null && previousPosition !== newPosition) {
+    if (
+      previousPosition !== null &&
+      newPosition !== null &&
+      previousPosition !== newPosition
+    ) {
       if (newPosition < previousPosition) {
         toastStore.success(`You moved up! Now #${newPosition}`);
       } else if (newPosition > previousPosition) {
@@ -124,15 +165,16 @@
     // Pre-turn countdown notifications
     if (newPosition !== null && previousPosition !== null) {
       if (newPosition === 2 && previousPosition > 2) {
-        toastStore.info('2 songs until you\'re up!');
+        toastStore.info("2 songs until you're up!");
       } else if (newPosition === 1 && previousPosition > 1) {
-        toastStore.success('You\'re next! Get ready! 🎤');
+        toastStore.success("You're next! Get ready! 🎤");
       }
     }
 
     // About to sing notification (just moved to nowPlaying)
     if (!wasPlaying && isNowPlaying) {
-      toastStore.success('You\'re up! Time to shine! ✨');
+      toastStore.success("You're up! Time to shine! ✨");
+      vibrateSuccess();
     }
 
     // Update tracking state
@@ -145,7 +187,7 @@
   function handleNameInput(e: Event) {
     const target = e.target as HTMLInputElement;
     myName = target.value;
-    localStorage.setItem('karaoke_name', myName);
+    localStorage.setItem("karaoke_name", myName);
   }
 
   function handleSongSelect(result: SearchResult) {
@@ -159,11 +201,11 @@
     selectedSong = {
       id: videoId,
       title,
-      channel: 'Popular in this room',
-      duration: '',
+      channel: "Popular in this room",
+      duration: "",
       durationSeconds: 0,
       thumbnail: `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`,
-      source: 'youtube',
+      source: "youtube",
       playable: true,
     };
     const url = `https://www.youtube.com/watch?v=${videoId}`;
@@ -171,56 +213,60 @@
   }
 
   async function validateUrl(url: string, title?: string) {
-    validationStatus = 'checking';
-    validationMsg = 'Checking video...';
+    validationStatus = "checking";
+    validationMsg = "Checking video...";
 
     const videoId = extractVideoId(url);
     if (!videoId) {
-      validationStatus = 'invalid';
-      validationMsg = 'Invalid YouTube URL';
+      validationStatus = "invalid";
+      validationMsg = "Invalid YouTube URL";
       validatedUrl = null;
       validatedTitle = null;
       return;
     }
 
     // Use YouTube IFrame API to validate
-    if (typeof window !== 'undefined' && (window as any).YT) {
+    if (typeof window !== "undefined" && window.YT) {
       await validateWithYT(videoId, url, title);
     } else {
       // Fallback: trust the URL
-      validationStatus = 'valid';
-      validationMsg = 'Ready to add!';
+      validationStatus = "valid";
+      validationMsg = "Ready to add!";
       validatedUrl = url;
-      validatedTitle = title ?? 'Unknown Song';
+      validatedTitle = title ?? "Unknown Song";
     }
   }
 
-  function validateWithYT(videoId: string, url: string, title?: string): Promise<void> {
+  function validateWithYT(
+    videoId: string,
+    url: string,
+    title?: string,
+  ): Promise<void> {
     return new Promise((resolve) => {
-      const container = document.getElementById('validationPlayer');
+      const container = document.getElementById("validationPlayer");
       if (!container) {
-        validationStatus = 'valid';
+        validationStatus = "valid";
         validatedUrl = url;
-        validatedTitle = title ?? 'Unknown Song';
+        validatedTitle = title ?? "Unknown Song";
         resolve();
         return;
       }
 
       container.innerHTML = '<div id="ytPlayer"></div>';
 
-      ytPlayer = new (window as any).YT.Player('ytPlayer', {
-        height: '1',
-        width: '1',
+      ytPlayer = new window.YT.Player("ytPlayer", {
+        height: "1",
+        width: "1",
         videoId,
         playerVars: { autoplay: 0, controls: 0 },
         events: {
-          onReady: (event: any) => {
+          onReady: (event: YT.PlayerEvent) => {
             const duration = event.target.getDuration();
             const data = event.target.getVideoData();
 
             if (duration === 0) {
-              validationStatus = 'invalid';
-              validationMsg = 'Livestreams not allowed';
+              validationStatus = "invalid";
+              validationMsg = "Livestreams not allowed";
               validatedUrl = null;
               resolve();
               return;
@@ -229,22 +275,22 @@
             if (duration > MAX_DURATION) {
               const mins = Math.floor(duration / 60);
               const secs = Math.round(duration % 60);
-              validationStatus = 'invalid';
-              validationMsg = `Too long (${mins}:${secs.toString().padStart(2, '0')}) - max 7 minutes`;
+              validationStatus = "invalid";
+              validationMsg = `Too long (${mins}:${secs.toString().padStart(2, "0")}) - max 7 minutes`;
               validatedUrl = null;
               resolve();
               return;
             }
 
             validatedUrl = url;
-            validatedTitle = title ?? data.title ?? 'Unknown Song';
-            validationStatus = 'valid';
-            validationMsg = 'Ready to add!';
+            validatedTitle = title ?? data.title ?? "Unknown Song";
+            validationStatus = "valid";
+            validationMsg = "Ready to add!";
             resolve();
           },
           onError: () => {
-            validationStatus = 'invalid';
-            validationMsg = 'Video not found or unavailable';
+            validationStatus = "invalid";
+            validationMsg = "Video not found or unavailable";
             validatedUrl = null;
             resolve();
           },
@@ -253,29 +299,14 @@
 
       // Timeout fallback
       setTimeout(() => {
-        if (validationStatus === 'checking') {
-          validationStatus = 'invalid';
-          validationMsg = 'Could not load video';
+        if (validationStatus === "checking") {
+          validationStatus = "invalid";
+          validationMsg = "Could not load video";
           validatedUrl = null;
           resolve();
         }
       }, 10000);
     });
-  }
-
-  function extractVideoId(url: string): string | null {
-    if (!url) return null;
-    const patterns = [
-      /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([a-zA-Z0-9_-]{11})/,
-      /youtube\.com\/watch\?.*&v=([a-zA-Z0-9_-]{11})/,
-      /youtube\.com\/shorts\/([a-zA-Z0-9_-]{11})/,
-      /music\.youtube\.com\/watch\?v=([a-zA-Z0-9_-]{11})/,
-    ];
-    for (const pattern of patterns) {
-      const match = url.match(pattern);
-      if (match) return match[1];
-    }
-    return null;
   }
 
   async function handleJoin() {
@@ -287,7 +318,7 @@
     const isVerified = verifiedNames[myName.toLowerCase()] === true;
     const videoId = extractVideoId(validatedUrl);
     if (!videoId) {
-      joinError = 'Invalid video URL';
+      joinError = "Invalid video URL";
       isJoining = false;
       return;
     }
@@ -302,22 +333,28 @@
     isJoining = false;
 
     switch (result.kind) {
-      case 'joined':
+      case "joined":
         toastStore.success(`You're #${result.position} in the queue!`);
+        vibrateSuccess();
         resetForm();
         break;
-      case 'requiresPin':
-        pendingJoin = { name: myName.trim(), url: validatedUrl, title: validatedTitle };
+      case "requiresPin":
+        pendingJoin = {
+          name: myName.trim(),
+          url: validatedUrl,
+          title: validatedTitle,
+        };
         pinName = myName.trim();
-        pinMode = 'verify';
+        pinMode = "verify";
         break;
-      case 'alreadyInQueue':
+      case "alreadyInQueue":
         joinError = `${result.name} is already in the queue`;
         break;
-      case 'invalidVideo':
+      case "invalidVideo":
         joinError = result.reason;
         break;
-      case 'error':
+      case "error":
+        vibrateError();
         joinError = result.message;
         break;
     }
@@ -327,8 +364,8 @@
     selectedSong = null;
     validatedUrl = null;
     validatedTitle = null;
-    validationStatus = 'idle';
-    validationMsg = '';
+    validationStatus = "idle";
+    validationMsg = "";
     joinError = null;
   }
 
@@ -341,22 +378,24 @@
     if (direction === 0) {
       const { [entryId]: _, ...rest } = myVotes;
       myVotes = rest;
+      vibrateTap();
     } else {
       myVotes = { ...myVotes, [entryId]: direction };
+      vibrateTap();
     }
-    localStorage.setItem('karaoke_votes', JSON.stringify(myVotes));
+    localStorage.setItem("karaoke_votes", JSON.stringify(myVotes));
 
     // Optimistic UI update - adjust vote count in queue
     room = {
       ...room,
-      queue: room.queue.map(e =>
-        e.id === entryId ? { ...e, votes: e.votes + voteDelta } : e
-      )
+      queue: room.queue.map((e) =>
+        e.id === entryId ? { ...e, votes: e.votes + voteDelta } : e,
+      ),
     };
 
     // Send to server (will reconcile on next state update)
     const result = await voteApi(entryId, direction, voterId);
-    if (result.kind !== 'voted') {
+    if (result.kind !== "voted") {
       // Revert on failure
       if (previousVote === 0) {
         const { [entryId]: _, ...rest } = myVotes;
@@ -364,66 +403,74 @@
       } else {
         myVotes = { ...myVotes, [entryId]: previousVote };
       }
-      localStorage.setItem('karaoke_votes', JSON.stringify(myVotes));
-      const errorMsg = result.kind === 'error' ? result.message : 'Vote failed';
+      localStorage.setItem("karaoke_votes", JSON.stringify(myVotes));
+      const errorMsg = result.kind === "error" ? result.message : "Vote failed";
       toastStore.error(errorMsg);
     }
   }
 
   async function handleRemove(entryId: string) {
-    if (!confirm('Remove your song from the queue?')) return;
+    if (!confirm("Remove your song from the queue?")) return;
     const result = await removeApi(entryId, myName);
-    if (result.kind !== 'removed') {
-      const errorMsg = result.kind === 'error' ? result.message
-        : result.kind === 'entryNotFound' ? 'Song not found'
-        : result.kind === 'unauthorized' ? 'Not authorized'
-        : 'Failed to remove';
+    if (result.kind !== "removed") {
+      const errorMsg =
+        result.kind === "error"
+          ? result.message
+          : result.kind === "entryNotFound"
+            ? "Song not found"
+            : result.kind === "unauthorized"
+              ? "Not authorized"
+              : "Failed to remove";
       toastStore.error(errorMsg);
     }
   }
 
   async function handleSkip() {
-    if (!confirm('Skip your song?')) return;
+    if (!confirm("Skip your song?")) return;
     const result = await skipApi(myName);
-    if (result.kind === 'skipped') {
-      toastStore.success('Song skipped');
+    if (result.kind === "skipped") {
+      toastStore.success("Song skipped");
     } else {
-      const errorMsg = result.kind === 'error' ? result.message
-        : result.kind === 'nothingPlaying' ? 'Nothing is playing'
-        : result.kind === 'unauthorized' ? 'Not authorized'
-        : 'Failed to skip';
+      const errorMsg =
+        result.kind === "error"
+          ? result.message
+          : result.kind === "nothingPlaying"
+            ? "Nothing is playing"
+            : result.kind === "unauthorized"
+              ? "Not authorized"
+              : "Failed to skip";
       toastStore.error(errorMsg);
     }
   }
 
   function handlePinSuccess() {
     verifiedNames = { ...verifiedNames, [pinName.toLowerCase()]: true };
-    localStorage.setItem('karaoke_verified', JSON.stringify(verifiedNames));
+    localStorage.setItem("karaoke_verified", JSON.stringify(verifiedNames));
 
-    if (pinMode === 'verify' && pendingJoin) {
+    if (pinMode === "verify" && pendingJoin) {
       // Retry the join
       validatedUrl = pendingJoin.url;
       validatedTitle = pendingJoin.title;
       myName = pendingJoin.name;
       pendingJoin = null;
-      pinMode = 'closed';
+      pinMode = "closed";
       handleJoin();
     } else {
-      toastStore.success('Your name is locked in!');
-      pinMode = 'closed';
+      toastStore.success("Your name is locked in!");
+      pinMode = "closed";
     }
   }
 
   function handlePinClose() {
-    pinMode = 'closed';
+    pinMode = "closed";
     pendingJoin = null;
   }
 
   function handleChangeName() {
-    pinMode = 'closed';
+    pinMode = "closed";
     pendingJoin = null;
-    myName = '';
-    document.getElementById('nameInput')?.focus();
+    myName = "";
+    document.getElementById("nameInput")?.focus();
   }
 </script>
 
@@ -434,14 +481,38 @@
   </header>
 
   {#if room.nowPlaying}
-    <NowPlaying entry={room.nowPlaying} canSkip={isMyTurn} onSkip={handleSkip} />
+    <NowPlaying
+      entry={room.nowPlaying}
+      canSkip={isMyTurn}
+      onSkip={handleSkip}
+    />
+  {/if}
+
+  {#if myPosition === 1 && !isMyTurn}
+    <div class="on-deck-banner on-deck-next">
+      <div class="deck-icon">🎙️</div>
+      <div class="deck-text">
+        <strong>You're up next!</strong><br />
+        Get ready to take the mic!
+      </div>
+    </div>
+  {:else if myPosition === 2}
+    <div class="on-deck-banner on-deck-soon">
+      <div class="deck-icon">👀</div>
+      <div class="deck-text">
+        <strong>On deck</strong><br />
+        One song until your turn
+      </div>
+    </div>
   {/if}
 
   {#if myEntry}
     <div class="my-song-card">
       <div class="my-song-header">
         <span class="my-song-label">Your song</span>
-        <span class="my-song-position">#{room.queue.findIndex(e => e.id === myEntry.id) + 1} in queue</span>
+        <span class="my-song-position"
+          >#{room.queue.findIndex((e) => e.id === myEntry.id) + 1} in queue</span
+        >
       </div>
       <div class="my-song-title">{myEntry.title}</div>
       <button class="btn btn-change" onclick={() => handleRemove(myEntry.id)}>
@@ -482,13 +553,15 @@
         {#if selectedSong}
           <div class="selected-song">
             <div class="selected-song-title">{selectedSong.title}</div>
-            <div class="selected-song-meta">{selectedSong.channel} · {selectedSong.duration}</div>
+            <div class="selected-song-meta">
+              {selectedSong.channel} · {selectedSong.duration}
+            </div>
           </div>
         {/if}
 
-        {#if validationStatus !== 'idle'}
+        {#if validationStatus !== "idle"}
           <div class="validation-status {validationStatus}">
-            {#if validationStatus === 'checking'}
+            {#if validationStatus === "checking"}
               <div class="validation-spinner"></div>
             {/if}
             {validationMsg}
@@ -524,6 +597,18 @@
   onClose={handlePinClose}
   onChangeName={handleChangeName}
 />
+
+{#if showRecap}
+  <div class="recap-overlay">
+    <div class="recap-content">
+      <div class="recap-applause">👏 APPLAUSE! 👏</div>
+      <div class="recap-votes">
+        {recapVotes > 0 ? "+" : ""}{recapVotes}
+      </div>
+      <div class="recap-label">VOTES RECEIVED</div>
+    </div>
+  </div>
+{/if}
 
 <HelpButton />
 
@@ -563,7 +648,11 @@
 
   .my-song-card {
     border-color: rgba(78, 205, 196, 0.3);
-    background: linear-gradient(135deg, rgba(78, 205, 196, 0.1) 0%, var(--bg-card) 100%);
+    background: linear-gradient(
+      135deg,
+      rgba(78, 205, 196, 0.1) 0%,
+      var(--bg-card) 100%
+    );
   }
 
   .my-song-header {
@@ -606,7 +695,11 @@
 
   .my-turn-card {
     border-color: rgba(255, 107, 157, 0.3);
-    background: linear-gradient(135deg, rgba(255, 107, 157, 0.15) 0%, var(--bg-card) 100%);
+    background: linear-gradient(
+      135deg,
+      rgba(255, 107, 157, 0.15) 0%,
+      var(--bg-card) 100%
+    );
     text-align: center;
   }
 
@@ -687,5 +780,130 @@
     margin-top: 12px;
     text-align: center;
     animation: shake 0.4s ease;
+  }
+
+  /* On-Deck Banner */
+  .on-deck-banner {
+    border-radius: 16px;
+    padding: 16px;
+    margin-bottom: 24px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    animation: slideDown 0.4s ease-out;
+  }
+
+  .on-deck-next {
+    background: linear-gradient(
+      135deg,
+      rgba(123, 237, 159, 0.2) 0%,
+      rgba(123, 237, 159, 0.05) 100%
+    );
+    border: 1px solid rgba(123, 237, 159, 0.3);
+  }
+
+  .on-deck-soon {
+    background: linear-gradient(
+      135deg,
+      rgba(255, 165, 2, 0.2) 0%,
+      rgba(255, 165, 2, 0.05) 100%
+    );
+    border: 1px solid rgba(255, 165, 2, 0.3);
+  }
+
+  .deck-icon {
+    font-size: 1.8rem;
+  }
+
+  .deck-text {
+    font-size: 0.95rem;
+    color: var(--text);
+    line-height: 1.3;
+  }
+
+  .deck-text strong {
+    font-size: 1.05rem;
+    display: block;
+    margin-bottom: 2px;
+  }
+
+  /* Cinematic Recap */
+  .recap-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.85);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 1000;
+    animation: fadeIn 0.3s ease;
+    backdrop-filter: blur(8px);
+  }
+
+  .recap-content {
+    text-align: center;
+    animation: zoomIn 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+
+  .recap-applause {
+    font-size: 1.5rem;
+    font-weight: 800;
+    color: var(--yellow);
+    letter-spacing: 0.1em;
+    margin-bottom: 24px;
+    text-shadow: 0 0 20px rgba(255, 165, 2, 0.5);
+  }
+
+  .recap-votes {
+    font-size: 5rem;
+    font-weight: 900;
+    line-height: 1;
+    margin-bottom: 12px;
+    background: linear-gradient(135deg, #fff 0%, #ccc 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    filter: drop-shadow(0 4px 12px rgba(0, 0, 0, 0.5));
+  }
+
+  .recap-label {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+  }
+
+  @keyframes slideDown {
+    from {
+      opacity: 0;
+      transform: translateY(-10px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @keyframes fadeIn {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  @keyframes zoomIn {
+    from {
+      opacity: 0;
+      transform: scale(0.8);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
   }
 </style>

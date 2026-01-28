@@ -1,6 +1,7 @@
 <script lang="ts">
-  import type { SearchResult } from '@karaoke/types';
-  import { search as searchApi } from '../api';
+  import type { SearchResult } from "@karaoke/types";
+  import { fade } from "svelte/transition";
+  import { search as searchApi } from "../api";
 
   interface Props {
     maxDuration?: number;
@@ -9,7 +10,7 @@
 
   let { maxDuration = 420, onSelect }: Props = $props();
 
-  let query = $state('');
+  let query = $state("");
   let results = $state<SearchResult[]>([]);
   let isSearching = $state(false);
   let selectedId = $state<string | null>(null);
@@ -27,13 +28,13 @@
 
     isSearching = false;
 
-    if (response.kind === 'error') {
+    if (response.kind === "error") {
       errorMsg = response.message;
       return;
     }
 
     if (response.results.length === 0) {
-      errorMsg = 'No results found. Try a different search.';
+      errorMsg = "No results found. Try a different search.";
       return;
     }
 
@@ -41,7 +42,7 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
-    if (e.key === 'Enter') {
+    if (e.key === "Enter") {
       performSearch();
     }
   }
@@ -66,7 +67,11 @@
       onkeydown={handleKeydown}
       autocomplete="off"
     />
-    <button class="btn btn-cyan search-btn" onclick={performSearch} disabled={isSearching}>
+    <button
+      class="btn btn-cyan search-btn"
+      onclick={performSearch}
+      disabled={isSearching}
+    >
       Search
     </button>
   </div>
@@ -80,8 +85,9 @@
     <div class="no-results">{errorMsg}</div>
   {:else if results.length > 0}
     <div class="search-results">
-      {#each results as result (result.id)}
+      {#each results as result, i (result.id)}
         <button
+          in:fade={{ duration: 200, delay: i * 50 }}
           class="search-result"
           class:selected={selectedId === result.id}
           class:too-long={isTooLong(result)}
@@ -89,8 +95,16 @@
           disabled={isTooLong(result)}
         >
           <div class="result-thumb-wrapper">
-            <img class="result-thumb" src={result.thumbnail} alt="" loading="lazy" />
-            <span class="result-duration" class:too-long-badge={isTooLong(result)}>
+            <img
+              class="result-thumb"
+              src={result.thumbnail}
+              alt=""
+              loading="lazy"
+            />
+            <span
+              class="result-duration"
+              class:too-long-badge={isTooLong(result)}
+            >
               {result.duration}
             </span>
           </div>

@@ -13,6 +13,7 @@
     "build:inline": "vite build && node scripts/inline.js"
   },
   "dependencies": {
+    "@karaoke/domain": "workspace:*",
     "@karaoke/types": "workspace:*"
   },
   "devDependencies": {

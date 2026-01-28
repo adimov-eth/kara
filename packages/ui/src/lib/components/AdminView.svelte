@@ -15,6 +15,7 @@
     clearAdminToken,
     getRoomId,
   } from '$lib';
+  import { extractVideoId } from '@karaoke/domain';
   import { toastStore } from '$lib/stores/toast.svelte';
 
   // Auth state
@@ -192,21 +193,6 @@
     selectedId = result.id;
     addUrl = `https://www.youtube.com/watch?v=${result.id}`;
     addTitle = result.title;
-  }
-
-  function extractVideoId(url: string): string | null {
-    if (!url) return null;
-    const patterns = [
-      /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([a-zA-Z0-9_-]{11})/,
-      /youtube\.com\/watch\?.*&v=([a-zA-Z0-9_-]{11})/,
-      /youtube\.com\/shorts\/([a-zA-Z0-9_-]{11})/,
-      /music\.youtube\.com\/watch\?v=([a-zA-Z0-9_-]{11})/,
-    ];
-    for (const pattern of patterns) {
-      const match = url.match(pattern);
-      if (match) return match[1];
-    }
-    return null;
   }
 
   async function handleAdd() {

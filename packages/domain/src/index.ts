@@ -38,3 +38,13 @@ export {
   isValidPin,
   normalizeName,
 } from './identity.js'
+
+// Validation
+export {
+  validateName,
+  validateTitle,
+  validateVideoId,
+  sanitizeName,
+  sanitizeTitle,
+  type ValidationError,
+} from './validation.js'

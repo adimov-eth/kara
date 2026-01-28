@@ -9,18 +9,20 @@
   let wsConnected = $state(false);
   let roomId = $state('');
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let player: any = null;
+  let player: YT.Player | null = null;
   let playerReady = $state(false);
   let currentVideoId: string | null = null;
   let isAdvancing = false;
 
   // Player modes
-  type PlayerMode = 'playing_song' | 'pause_screen' | 'idle_screen';
+  type PlayerMode = 'playing_song' | 'pause_screen' | 'idle_screen' | 'needs_interaction';
   let playerMode = $state<PlayerMode>('idle_screen');
   let pauseTimeout: ReturnType<typeof setTimeout> | null = null;
   let countdown = $state(0);
   let countdownInterval: ReturnType<typeof setInterval> | null = null;
+
+  // Track if we need user interaction to start
+  let pendingSong: Entry | null = null;
 
   // Polling fallback
   let pollInterval: ReturnType<typeof setInterval> | null = null;
@@ -58,12 +60,12 @@
 
     // Load YouTube API
     if (typeof window !== 'undefined') {
-      (window as any).onYouTubeIframeAPIReady = initPlayer;
-      if (!(window as any).YT) {
+      window.onYouTubeIframeAPIReady = initPlayer;
+      if (!window.YT) {
         const tag = document.createElement('script');
         tag.src = 'https://www.youtube.com/iframe_api';
         document.head.appendChild(tag);
-      } else if ((window as any).YT.Player) {
+      } else if (window.YT.Player) {
         initPlayer();
       }
     }
@@ -113,8 +115,10 @@
   }
 
   function initPlayer() {
+    if (!window.YT) return;
+
     // Create player - it will be hidden until a song plays
-    player = new (window as any).YT.Player('yt-player', {
+    player = new window.YT.Player('yt-player', {
       width: '100%',
       height: '100%',
       playerVars: {
@@ -137,14 +141,22 @@
             playerMode = 'idle_screen';
           }
         },
-        onStateChange: (event: any) => {
-          if (event.data === (window as any).YT.PlayerState.ENDED) {
+        onStateChange: (event: YT.OnStateChangeEvent) => {
+          // Playing - clear pending and ensure correct mode
+          if (event.data === YT.PlayerState.PLAYING) {
+            pendingSong = null;
+            if (playerMode === 'needs_interaction') {
+              playerMode = 'playing_song';
+            }
+          }
+          // Ended - show pause screen
+          if (event.data === YT.PlayerState.ENDED) {
             if (playerMode === 'playing_song') {
               showPauseScreen();
             }
           }
         },
-        onError: (event: any) => {
+        onError: (event: YT.OnErrorEvent) => {
           console.error('YouTube player error:', event.data);
           if (playerMode === 'playing_song') {
             showPauseScreen();
@@ -157,9 +169,34 @@
   function loadSong(entry: Entry) {
     if (!entry || !playerReady || !entry.videoId) return;
     clearTimers();
-    playerMode = 'playing_song';
     currentVideoId = entry.videoId;
+    pendingSong = entry;
+
+    // Try to play - if blocked, we'll show interaction screen
+    playerMode = 'playing_song';
     player?.loadVideoById(entry.videoId);
+
+    // Check if playback actually started after a short delay
+    setTimeout(() => {
+      if (player && pendingSong) {
+        const state = player.getPlayerState();
+        // -1 = unstarted, 3 = buffering is ok, 1 = playing is ok
+        // If still unstarted after load, likely blocked
+        if (state === -1 || state === 5) { // UNSTARTED or CUED
+          playerMode = 'needs_interaction';
+        }
+      }
+    }, 1000);
+  }
+
+  function handleStartClick() {
+    if (pendingSong && player) {
+      player.playVideo();
+      playerMode = 'playing_song';
+      pendingSong = null;
+    } else if (room.nowPlaying) {
+      loadSong(room.nowPlaying);
+    }
   }
 
   function showPauseScreen() {
@@ -269,6 +306,20 @@
     </div>
   {/if}
 
+  <!-- Needs Interaction: Browser blocked autoplay -->
+  {#if playerMode === 'needs_interaction'}
+    <button class="overlay start-overlay" onclick={handleStartClick}>
+      <div class="start-content">
+        <div class="start-icon">▶</div>
+        <div class="start-title">Click to Start</div>
+        {#if room.nowPlaying}
+          <div class="start-song">{room.nowPlaying.title}</div>
+          <div class="start-singer">{room.nowPlaying.name}</div>
+        {/if}
+      </div>
+    </button>
+  {/if}
+
   <!-- Idle Screen: No songs in queue -->
   {#if playerMode === 'idle_screen'}
     <div class="overlay idle-overlay">
@@ -360,6 +411,54 @@
     align-items: center;
     justify-content: center;
     background: var(--bg-deep);
+  }
+
+  /* Start Screen (needs interaction) */
+  .start-overlay {
+    background: radial-gradient(ellipse at center, rgba(78, 205, 196, 0.15) 0%, var(--bg-deep) 70%);
+    cursor: pointer;
+    border: none;
+    width: 100%;
+    transition: background 0.3s ease;
+  }
+
+  .start-overlay:hover {
+    background: radial-gradient(ellipse at center, rgba(78, 205, 196, 0.25) 0%, var(--bg-deep) 70%);
+  }
+
+  .start-content {
+    text-align: center;
+  }
+
+  .start-icon {
+    font-size: 6rem;
+    color: var(--cyan);
+    margin-bottom: 24px;
+    text-shadow: 0 0 60px var(--cyan);
+    animation: pulse 2s ease-in-out infinite;
+  }
+
+  .start-title {
+    font-size: 2rem;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 32px;
+  }
+
+  .start-song {
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 8px;
+    max-width: 600px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .start-singer {
+    font-size: 1.25rem;
+    color: var(--text-muted);
   }
 
   /* Pause Screen */

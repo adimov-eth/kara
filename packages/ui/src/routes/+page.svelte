@@ -14,6 +14,23 @@
   // Recently visited rooms from localStorage
   let recentRooms = $state<string[]>([]);
 
+  // Active rooms from API
+  interface ActiveRoom {
+    roomId: string;
+    lastActivity: number;
+    queueSize?: number;
+    nowPlaying?: string;
+  }
+  let activeRooms = $state<ActiveRoom[]>([]);
+  let activeRoomsLoading = $state(true);
+
+  // Filter active rooms: exclude ones in recent, only show rooms with queue or nowPlaying
+  let filteredActiveRooms = $derived(
+    activeRooms
+      .filter(room => !recentRooms.includes(room.roomId))
+      .filter(room => (room.queueSize && room.queueSize > 0) || room.nowPlaying)
+  );
+
   $effect(() => {
     if (typeof localStorage !== 'undefined') {
       const stored = localStorage.getItem('karaoke_recent_rooms');
@@ -26,6 +43,33 @@
       }
     }
   });
+
+  // Fetch active rooms on mount
+  $effect(() => {
+    fetchActiveRooms();
+  });
+
+  async function fetchActiveRooms() {
+    try {
+      const res = await fetch('/api/rooms/active');
+      const result = await res.json();
+      activeRooms = result.rooms || [];
+    } catch {
+      activeRooms = [];
+    } finally {
+      activeRoomsLoading = false;
+    }
+  }
+
+  function formatTimeAgo(timestamp: number): string {
+    const diff = Date.now() - timestamp;
+    const minutes = Math.floor(diff / 60000);
+    if (minutes < 1) return 'just now';
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    return `${Math.floor(hours / 24)}d ago`;
+  }
 
   function saveRecentRoom(roomId: string) {
     if (typeof localStorage === 'undefined') return;
@@ -161,7 +205,8 @@
     }
   }
 
-  function goToRecent(roomId: string) {
+  function goToRoom(roomId: string) {
+    saveRecentRoom(roomId);
     goto(`/${roomId}`);
   }
 </script>
@@ -206,7 +251,7 @@
           <div class="recent-label">Recent rooms</div>
           <div class="recent-list">
             {#each recentRooms as room}
-              <button class="recent-btn" onclick={() => goToRecent(room)}>
+              <button class="recent-btn" onclick={() => goToRoom(room)}>
                 {room}
               </button>
             {/each}
@@ -278,6 +323,37 @@
       </div>
     {/if}
   </div>
+
+  {#if step === 'enter' && (filteredActiveRooms.length > 0 || activeRoomsLoading)}
+    <div class="active-rooms">
+      <div class="active-rooms-header">
+        <span class="pulse-dot"></span>
+        <span class="active-label">Happening Now</span>
+      </div>
+      {#if activeRoomsLoading}
+        <div class="active-loading">Loading...</div>
+      {:else}
+        <div class="active-list">
+          {#each filteredActiveRooms as room}
+            <button class="active-room-btn" onclick={() => goToRoom(room.roomId)}>
+              <span class="room-name">{room.roomId}</span>
+              <span class="room-meta">
+                {#if room.nowPlaying}
+                  <span class="now-playing" title={room.nowPlaying}>
+                    {room.nowPlaying.length > 30 ? room.nowPlaying.slice(0, 30) + '...' : room.nowPlaying}
+                  </span>
+                {/if}
+                {#if room.queueSize && room.queueSize > 0}
+                  <span class="queue-count">{room.queueSize} waiting</span>
+                {/if}
+                <span class="last-active">{formatTimeAgo(room.lastActivity)}</span>
+              </span>
+            </button>
+          {/each}
+        </div>
+      {/if}
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -392,5 +468,109 @@
   .recent-btn:hover {
     background: rgba(78, 205, 196, 0.2);
     border-color: var(--cyan);
+  }
+
+  /* Active rooms */
+  .active-rooms {
+    margin-top: 32px;
+    padding: 24px;
+    background: var(--bg-card);
+    border-radius: 16px;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+  }
+
+  .active-rooms-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+
+  .pulse-dot {
+    width: 8px;
+    height: 8px;
+    background: var(--success);
+    border-radius: 50%;
+    animation: pulse 2s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  .active-label {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+  }
+
+  .active-loading {
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    text-align: center;
+    padding: 12px;
+  }
+
+  .active-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .active-room-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    color: var(--text);
+    padding: 12px 16px;
+    border-radius: 12px;
+    font-family: inherit;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    text-align: left;
+    width: 100%;
+  }
+
+  .active-room-btn:hover {
+    background: rgba(255, 255, 255, 0.06);
+    border-color: rgba(78, 205, 196, 0.3);
+  }
+
+  .room-name {
+    font-weight: 600;
+    font-size: 1rem;
+    color: var(--cyan);
+  }
+
+  .room-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+  }
+
+  .queue-count {
+    background: rgba(78, 205, 196, 0.15);
+    padding: 2px 8px;
+    border-radius: 8px;
+    color: var(--cyan);
+  }
+
+  .now-playing {
+    opacity: 0.7;
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .last-active {
+    opacity: 0.5;
   }
 </style>

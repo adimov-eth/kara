@@ -27,6 +27,7 @@ import {
   type CreateRoomResult,
   type CheckRoomResult,
   type AdminVerifyResult,
+  type SearchResult,
 } from '@karaoke/types'
 import {
   sortQueue,
@@ -51,6 +52,11 @@ import {
   verifyPin,
   isValidPin,
   normalizeName,
+  validateName,
+  validateTitle,
+  validateVideoId,
+  sanitizeName,
+  sanitizeTitle,
 } from '@karaoke/domain'
 
 const STATE_KEY = 'state'
@@ -63,9 +69,31 @@ const ADMIN_SESSION_DURATION_MS = 4 * 60 * 60 * 1000 // 4 hours
 const PIN_RATE_LIMIT_WINDOW_MS = 60 * 1000 // 1 minute
 const PIN_RATE_LIMIT_MAX_ATTEMPTS = 5
 
+// Rate limits per minute
+const SEARCH_RATE_LIMIT = 20
+const JOIN_RATE_LIMIT = 5
+const VOTE_RATE_LIMIT = 60
+
 interface RateLimitEntry {
   attempts: number
   windowStart: number
+}
+
+type RateLimitType = 'pin' | 'search' | 'join' | 'vote'
+
+const RATE_LIMITS: Record<RateLimitType, number> = {
+  pin: PIN_RATE_LIMIT_MAX_ATTEMPTS,
+  search: SEARCH_RATE_LIMIT,
+  join: JOIN_RATE_LIMIT,
+  vote: VOTE_RATE_LIMIT,
+}
+
+// Search cache settings
+const SEARCH_CACHE_TTL_MS = 5 * 60 * 1000 // 5 minutes
+
+interface SearchCacheEntry {
+  results: SearchResult[]
+  expiresAt: number
 }
 
 export class RoomDO implements DurableObject {
@@ -77,8 +105,10 @@ export class RoomDO implements DurableObject {
   private roomAdmin: RoomAdmin | null = null
   // Admin sessions (in-memory, not persisted - sessions clear on DO restart)
   private adminSessions: Map<string, AdminSession> = new Map()
-  // Rate limiting for PIN attempts (in-memory)
-  private pinRateLimits: Map<string, RateLimitEntry> = new Map()
+  // Rate limiting (in-memory) - keyed by "type:clientId"
+  private rateLimits: Map<string, RateLimitEntry> = new Map()
+  // Search cache (in-memory) - reduces YouTube API calls
+  private searchCache: Map<string, SearchCacheEntry> = new Map()
   // Track extension WebSockets separately (tags can't be updated after acceptWebSocket)
   private extensionSockets: Set<WebSocket> = new Set()
 
@@ -270,24 +300,33 @@ export class RoomDO implements DurableObject {
   }
 
   /**
-   * Check rate limit for PIN attempts. Returns true if request should be blocked.
+   * Check rate limit. Returns true if request should be blocked.
    */
-  private checkPinRateLimit(clientId: string): boolean {
+  private checkRateLimit(type: RateLimitType, clientId: string): boolean {
     const now = Date.now()
-    const entry = this.pinRateLimits.get(clientId)
+    const key = `${type}:${clientId}`
+    const entry = this.rateLimits.get(key)
+    const limit = RATE_LIMITS[type]
 
     if (!entry || now - entry.windowStart > PIN_RATE_LIMIT_WINDOW_MS) {
       // New window
-      this.pinRateLimits.set(clientId, { attempts: 1, windowStart: now })
+      this.rateLimits.set(key, { attempts: 1, windowStart: now })
       return false
     }
 
-    if (entry.attempts >= PIN_RATE_LIMIT_MAX_ATTEMPTS) {
+    if (entry.attempts >= limit) {
       return true // Blocked
     }
 
     entry.attempts++
     return false
+  }
+
+  /**
+   * Clear rate limit for a client (e.g., after successful auth)
+   */
+  private clearRateLimit(type: RateLimitType, clientId: string): void {
+    this.rateLimits.delete(`${type}:${clientId}`)
   }
 
   /**
@@ -760,6 +799,13 @@ export class RoomDO implements DurableObject {
   }
 
   private async handleJoin(request: Request): Promise<Response> {
+    // Rate limit join requests
+    const clientId = this.getClientId(request)
+    if (this.checkRateLimit('join', clientId)) {
+      const result: JoinResult = { kind: 'error', message: 'Too many join attempts. Try again in 1 minute.' }
+      return Response.json(result, { status: 429 })
+    }
+
     const body = (await request.json()) as {
       name?: string
       videoId?: string
@@ -768,16 +814,29 @@ export class RoomDO implements DurableObject {
     }
     const { name, videoId, title, verified } = body
 
-    if (!name || name.trim() === '') {
-      const result: JoinResult = { kind: 'error', message: 'Name required' }
-      return Response.json(result, { status: 400 })
-    }
-    if (!videoId) {
-      const result: JoinResult = { kind: 'invalidVideo', reason: 'Video ID required' }
+    // Validate inputs
+    const nameError = validateName(name)
+    if (nameError) {
+      const result: JoinResult = { kind: 'error', message: nameError.message }
       return Response.json(result, { status: 400 })
     }
 
-    const trimmedName = name.trim()
+    const videoIdError = validateVideoId(videoId)
+    if (videoIdError) {
+      const result: JoinResult = { kind: 'invalidVideo', reason: videoIdError.message }
+      return Response.json(result, { status: 400 })
+    }
+
+    // Title validation - optional, defaults to 'Unknown Song'
+    const titleError = title ? validateTitle(title) : null
+    if (titleError) {
+      const result: JoinResult = { kind: 'error', message: titleError.message }
+      return Response.json(result, { status: 400 })
+    }
+
+    // Sanitize inputs
+    const trimmedName = sanitizeName(name!)
+    const sanitizedTitle = title ? sanitizeTitle(title) : 'Unknown Song'
 
     // Check if name is claimed with PIN
     const identity = await this.getIdentity(trimmedName)
@@ -787,7 +846,7 @@ export class RoomDO implements DurableObject {
     }
 
     const state = await this.getQueueState()
-    const joinError = canJoinQueue(state, name)
+    const joinError = canJoinQueue(state, trimmedName)
     if (joinError) {
       // Check if the error is about already being in queue
       if (joinError.includes('already in queue')) {
@@ -801,8 +860,8 @@ export class RoomDO implements DurableObject {
     const entry = createEntry({
       id: generateId(),
       name: trimmedName,
-      videoId,
-      title: title ?? 'Unknown Song',
+      videoId: videoId!,
+      title: sanitizedTitle,
       source: 'youtube',
       currentEpoch: state.currentEpoch,
       timestamp: Date.now(),
@@ -819,6 +878,13 @@ export class RoomDO implements DurableObject {
   }
 
   private async handleVote(request: Request): Promise<Response> {
+    // Rate limit vote requests
+    const clientId = this.getClientId(request)
+    if (this.checkRateLimit('vote', clientId)) {
+      const result: VoteResult = { kind: 'error', message: 'Too many votes. Try again in 1 minute.' }
+      return Response.json(result, { status: 429 })
+    }
+
     const body = (await request.json()) as { entryId?: string; direction?: number }
     const { entryId, direction } = body
     const voterId = request.headers.get('X-Voter-Id')
@@ -1039,12 +1105,28 @@ export class RoomDO implements DurableObject {
   }
 
   private async handleSearch(request: Request): Promise<Response> {
+    // Rate limit search requests
+    const clientId = this.getClientId(request)
+    if (this.checkRateLimit('search', clientId)) {
+      const result: SearchQueryResult = { kind: 'error', message: 'Too many searches. Try again in 1 minute.' }
+      return Response.json(result, { status: 429 })
+    }
+
     const url = new URL(request.url)
     const query = url.searchParams.get('q')
 
     if (!query || query.trim() === '') {
       const result: SearchQueryResult = { kind: 'error', message: 'Query required' }
       return Response.json(result, { status: 400 })
+    }
+
+    const normalizedQuery = query.trim().toLowerCase()
+
+    // Check cache first
+    const cached = this.searchCache.get(normalizedQuery)
+    if (cached && Date.now() < cached.expiresAt) {
+      const result: SearchQueryResult = { kind: 'results', results: cached.results }
+      return Response.json(result)
     }
 
     try {
@@ -1067,11 +1149,31 @@ export class RoomDO implements DurableObject {
       const data: unknown = await response.json()
       const videos = parseSearchResponse(data)
 
+      // Cache the results
+      this.searchCache.set(normalizedQuery, {
+        results: videos,
+        expiresAt: Date.now() + SEARCH_CACHE_TTL_MS,
+      })
+
+      // Clean up expired cache entries periodically (every 10 searches)
+      if (this.searchCache.size > 100) {
+        this.cleanupSearchCache()
+      }
+
       const result: SearchQueryResult = { kind: 'results', results: videos }
       return Response.json(result)
     } catch {
       const result: SearchQueryResult = { kind: 'error', message: 'Search request failed' }
       return Response.json(result, { status: 502 })
+    }
+  }
+
+  private cleanupSearchCache(): void {
+    const now = Date.now()
+    for (const [key, entry] of this.searchCache) {
+      if (now >= entry.expiresAt) {
+        this.searchCache.delete(key)
+      }
     }
   }
 
@@ -1309,7 +1411,7 @@ export class RoomDO implements DurableObject {
   private async handleAdminVerify(request: Request): Promise<Response> {
     // Rate limit PIN attempts
     const clientId = this.getClientId(request)
-    if (this.checkPinRateLimit(clientId)) {
+    if (this.checkRateLimit('pin', clientId)) {
       const result: AdminVerifyResult = { kind: 'error', message: 'Too many attempts. Try again in 1 minute.' }
       return Response.json(result, { status: 429 })
     }
@@ -1335,7 +1437,7 @@ export class RoomDO implements DurableObject {
     }
 
     // Success - clear rate limit for this client
-    this.pinRateLimits.delete(clientId)
+    this.clearRateLimit('pin', clientId)
 
     const session = this.createAdminSession()
     const result: AdminVerifyResult = { kind: 'verified', token: session.token }

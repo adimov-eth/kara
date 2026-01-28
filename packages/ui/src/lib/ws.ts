@@ -4,6 +4,21 @@ import { getRoomId } from './api';
 type StateHandler = (state: QueueState, extensionConnected?: boolean) => void;
 type ExtensionStatusHandler = (connected: boolean) => void;
 
+// Conditional logging - only in development
+const isDev = typeof window !== 'undefined' &&
+  (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+
+function log(...args: unknown[]) {
+  if (isDev) {
+    console.log('[WS]', ...args);
+  }
+}
+
+function logError(...args: unknown[]) {
+  // Always log errors
+  console.error('[WS]', ...args);
+}
+
 interface WebSocketManager {
   connect(clientType: ClientType): void;
   disconnect(): void;
@@ -60,7 +75,7 @@ export function createWebSocket(): WebSocketManager {
         // Heartbeat response
         break;
       case 'error':
-        console.error('[WS] Server error:', msg.message);
+        logError('Server error:', msg.message);
         break;
     }
   }
@@ -78,7 +93,7 @@ export function createWebSocket(): WebSocketManager {
       ws = new WebSocket(wsUrl);
 
       ws.onopen = () => {
-        console.log('[WS] Connected');
+        log('Connected');
         connected = true;
         reconnectAttempts = 0;
         ws!.send(JSON.stringify({ kind: 'subscribe', clientType }));
@@ -90,12 +105,12 @@ export function createWebSocket(): WebSocketManager {
           const msg: ServerMessage = JSON.parse(event.data);
           handleMessage(msg);
         } catch (e) {
-          console.error('[WS] Failed to parse message:', e);
+          logError('Failed to parse message:', e);
         }
       };
 
       ws.onclose = () => {
-        console.log('[WS] Disconnected');
+        log('Disconnected');
         connected = false;
         ws = null;
         stopHeartbeat();
@@ -103,15 +118,15 @@ export function createWebSocket(): WebSocketManager {
         // Reconnect with exponential backoff
         reconnectAttempts++;
         const delay = getReconnectDelay();
-        console.log(`[WS] Reconnecting in ${Math.round(delay / 1000)}s (attempt ${reconnectAttempts})`);
+        log(`Reconnecting in ${Math.round(delay / 1000)}s (attempt ${reconnectAttempts})`);
         reconnectTimeout = setTimeout(() => connect(currentClientType), delay);
       };
 
       ws.onerror = (err) => {
-        console.error('[WS] Error:', err);
+        logError('Error:', err);
       };
     } catch (e) {
-      console.error('[WS] Failed to connect:', e);
+      logError('Failed to connect:', e);
     }
   }
 
