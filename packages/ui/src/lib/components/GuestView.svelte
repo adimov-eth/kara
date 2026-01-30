@@ -7,6 +7,7 @@
     vote as voteApi,
     remove as removeApi,
     skip as skipApi,
+    getRoomId,
   } from "$lib";
   import { extractVideoId } from "@karaoke/domain";
   import { safeJsonParse } from "$lib/utils";
@@ -78,6 +79,7 @@
   const canJoin = $derived(
     myName.trim().length > 0 && validatedUrl && !isInQueue && !isMyTurn,
   );
+  const roomId = $derived(getRoomId());
 
   // Initialize
   onMount(() => {
@@ -478,6 +480,9 @@
   <header>
     <h1>Karaoke</h1>
     <p class="subtitle">Pick a song, join the queue, sing your heart out</p>
+    <a href="/{roomId}/player" target="_blank" rel="noopener" class="player-link">
+      Open Player
+    </a>
   </header>
 
   {#if room.nowPlaying}
@@ -633,6 +638,27 @@
     color: var(--text-muted);
     font-size: 0.95rem;
     font-weight: 300;
+  }
+
+  .player-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 12px;
+    padding: 8px 16px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 20px;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    text-decoration: none;
+    transition: all 0.2s ease;
+  }
+
+  .player-link:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--text);
+    border-color: rgba(255, 255, 255, 0.2);
   }
 
   .join-card,

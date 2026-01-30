@@ -51,6 +51,14 @@ export interface QueueState {
   nowPlaying: Entry | null
 }
 
+// Playback sync state - enables multi-device synchronized playback
+export interface PlaybackState {
+  videoId: string | null
+  startedAt: number       // Server timestamp (Date.now()) when playback began
+  position: number        // Position in seconds at startedAt
+  playing: boolean
+}
+
 // Legacy types (kept for storage migration in worker)
 export interface LegacyEntry {
   id: string
@@ -309,7 +317,7 @@ export type ClientType = 'user' | 'player' | 'admin' | 'extension'
 
 // Server -> Client messages
 export type ServerMessage =
-  | { kind: 'state'; state: QueueState; extensionConnected?: boolean }
+  | { kind: 'state'; state: QueueState; playback?: PlaybackState; extensionConnected?: boolean }
   | { kind: 'error'; message: string }
   | { kind: 'joined'; entry: Entry; position: number }
   | { kind: 'removed'; entryId: string }
@@ -317,7 +325,8 @@ export type ServerMessage =
   | { kind: 'skipped'; nowPlaying: Entry | null }
   | { kind: 'advanced'; nowPlaying: Entry | null; currentEpoch: number }
   | { kind: 'extensionStatus'; connected: boolean }
-  | { kind: 'pong' }
+  | { kind: 'pong'; serverTime?: number; clientTime?: number }
+  | { kind: 'sync'; playback: PlaybackState }
 
 // Client -> Server messages
 export type ClientMessage =
@@ -329,6 +338,38 @@ export type ClientMessage =
   | { kind: 'next'; currentId?: string | null }
   | { kind: 'reorder'; entryId: string; newPosition?: number; newEpoch?: number }
   | { kind: 'adminAdd'; name: string; videoId: string; title: string }
-  | { kind: 'ping' }
+  | { kind: 'ping'; clientTime?: number }
   | { kind: 'ended'; videoId: string } // Extension reports video end
   | { kind: 'error'; videoId: string; reason: string } // Extension reports video error
+  | { kind: 'syncRequest' } // Request current playback state for sync
+
+// =============================================================================
+// Feedback Types
+// =============================================================================
+
+export type FeedbackCategory = 'bug' | 'suggestion' | 'question' | 'other'
+
+export interface FeedbackRequest {
+  feedback: string           // max 2000 chars
+  title?: string             // max 100 chars, optional
+  category: FeedbackCategory
+  page: string               // current URL path
+  userAgent: string
+  roomId?: string            // if in a room
+  aiSummary?: string         // if user used "Help me explain"
+}
+
+export type FeedbackResult =
+  | { kind: 'created'; issueUrl: string; issueNumber: number }
+  | { kind: 'rateLimited' }
+  | { kind: 'validationError'; message: string }
+  | { kind: 'error'; message: string }
+
+export interface ClarifyRequest {
+  feedback: string
+  category: FeedbackCategory
+}
+
+export type ClarifyResult =
+  | { kind: 'clarified'; summary: string; suggestedTitle: string; questions: string[] }
+  | { kind: 'error'; message: string }

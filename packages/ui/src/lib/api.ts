@@ -13,6 +13,10 @@ import type {
   CheckRoomResult,
   AdminVerifyResult,
   RoomConfig,
+  FeedbackRequest,
+  FeedbackResult,
+  ClarifyRequest,
+  ClarifyResult,
 } from '@karaoke/types';
 
 const API = '/api';
@@ -32,6 +36,8 @@ export type {
   CheckRoomResult,
   AdminVerifyResult,
   RoomConfig,
+  FeedbackResult,
+  ClarifyResult,
 };
 
 // =============================================================================
@@ -323,3 +329,25 @@ export const adminReorder = (entryId: string, newPosition: number): Promise<Reor
     headers: getAdminAuthHeaders(),
     body: { entryId, newPosition },
   });
+
+// =============================================================================
+// Feedback
+// =============================================================================
+
+export async function submitFeedback(
+  req: Omit<FeedbackRequest, 'page' | 'userAgent'>
+): Promise<FeedbackResult> {
+  const fullReq: FeedbackRequest = {
+    ...req,
+    page: window.location.pathname,
+    userAgent: navigator.userAgent,
+    roomId: getRoomId() !== 'default' ? getRoomId() : undefined,
+  };
+  return api('/feedback', { method: 'POST', body: fullReq, skipRoom: true });
+}
+
+export async function clarifyFeedback(
+  req: ClarifyRequest
+): Promise<ClarifyResult> {
+  return api('/feedback/clarify', { method: 'POST', body: req, skipRoom: true });
+}

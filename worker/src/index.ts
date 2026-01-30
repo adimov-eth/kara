@@ -1,4 +1,5 @@
 import type { Env } from './env.js'
+import type { FeedbackRequest, ClarifyRequest } from '@karaoke/types'
 import { GUEST_HTML, PLAYER_HTML, ADMIN_HTML, LANDING_HTML } from './views/generated/index.js'
 
 // Re-export RoomDO for Cloudflare to find it
@@ -87,6 +88,213 @@ function getRoomStub(env: Env, roomId: string = DEFAULT_ROOM_ID): DurableObjectS
   return env.ROOM.get(id)
 }
 
+// =============================================================================
+// Feedback System
+// =============================================================================
+
+// Rate limiting for feedback (in-memory, simple)
+const feedbackRateLimits = new Map<string, { count: number; resetAt: number }>()
+
+function checkFeedbackRateLimit(clientIp: string): boolean {
+  const now = Date.now()
+  const entry = feedbackRateLimits.get(clientIp)
+
+  if (!entry || now > entry.resetAt) {
+    feedbackRateLimits.set(clientIp, { count: 1, resetAt: now + 60000 })
+    return false
+  }
+
+  if (entry.count >= 5) return true // 5 per minute
+  entry.count++
+  return false
+}
+
+function categoryToLabel(category: string): string {
+  switch (category) {
+    case 'bug': return 'bug'
+    case 'suggestion': return 'enhancement'
+    case 'question': return 'question'
+    default: return 'feedback'
+  }
+}
+
+function formatIssueBody(req: FeedbackRequest): string {
+  const lines = [
+    '## User Feedback',
+    '',
+    req.feedback,
+    '',
+  ]
+
+  if (req.aiSummary) {
+    lines.push('### AI Summary', '', req.aiSummary, '')
+  }
+
+  lines.push(
+    '---',
+    '',
+    '| Context | Value |',
+    '|---------|-------|',
+    `| Category | ${req.category} |`,
+    `| Page | \`${req.page}\` |`,
+  )
+
+  if (req.roomId) {
+    lines.push(`| Room | \`${req.roomId}\` |`)
+  }
+
+  lines.push(
+    `| Submitted | ${new Date().toISOString()} |`,
+    `| User Agent | ${req.userAgent.slice(0, 100)}... |`,
+    '',
+    '*Created via in-app feedback*'
+  )
+
+  return lines.join('\n')
+}
+
+async function handleFeedback(request: Request, env: Env): Promise<Response> {
+  const clientIp = request.headers.get('CF-Connecting-IP') || 'unknown'
+
+  if (checkFeedbackRateLimit(clientIp)) {
+    return addCorsHeaders(Response.json(
+      { kind: 'rateLimited' },
+      { status: 429 }
+    ))
+  }
+
+  try {
+    const body = await request.json() as FeedbackRequest
+
+    // Validation
+    if (!body.feedback?.trim() || body.feedback.length > 2000) {
+      return addCorsHeaders(Response.json(
+        { kind: 'validationError', message: 'Feedback must be 1-2000 characters' },
+        { status: 400 }
+      ))
+    }
+    if (body.title && body.title.length > 100) {
+      return addCorsHeaders(Response.json(
+        { kind: 'validationError', message: 'Title must be under 100 characters' },
+        { status: 400 }
+      ))
+    }
+
+    // Create GitHub issue
+    const title = body.title?.trim() || `[${body.category}] User Feedback`
+    const labels = ['feedback', categoryToLabel(body.category)]
+
+    const issueBody = formatIssueBody(body)
+
+    const ghResponse = await fetch('https://api.github.com/repos/adimov-eth/kara/issues', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${env.GITHUB_TOKEN}`,
+        'Accept': 'application/vnd.github+json',
+        'Content-Type': 'application/json',
+        'User-Agent': 'karaoke-feedback-bot',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+      body: JSON.stringify({ title, body: issueBody, labels }),
+    })
+
+    if (!ghResponse.ok) {
+      console.error('GitHub API error:', await ghResponse.text())
+      return addCorsHeaders(Response.json(
+        { kind: 'error', message: 'Failed to create issue' },
+        { status: 502 }
+      ))
+    }
+
+    const issue = await ghResponse.json() as { html_url: string; number: number }
+
+    return addCorsHeaders(Response.json({
+      kind: 'created',
+      issueUrl: issue.html_url,
+      issueNumber: issue.number,
+    }))
+  } catch (err) {
+    console.error('Feedback error:', err)
+    return addCorsHeaders(Response.json(
+      { kind: 'error', message: 'Server error' },
+      { status: 500 }
+    ))
+  }
+}
+
+async function handleClarify(request: Request, env: Env): Promise<Response> {
+  try {
+    const body = await request.json() as ClarifyRequest
+
+    if (!body.feedback?.trim()) {
+      return addCorsHeaders(Response.json(
+        { kind: 'error', message: 'Feedback required' },
+        { status: 400 }
+      ))
+    }
+
+    const prompt = `You are helping a user submit feedback for a karaoke queue app. Analyze their feedback and help them articulate it better.
+
+Category: ${body.category}
+Feedback: ${body.feedback}
+
+Respond with JSON only (no markdown):
+{
+  "summary": "1-2 sentence summary of what you understood",
+  "suggestedTitle": "concise title under 50 chars",
+  "questions": ["clarifying question 1", "clarifying question 2"] // empty array if feedback is clear
+}
+
+Be concise and helpful. The user is not technical.`
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-3-haiku-20240307',
+        max_tokens: 300,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    })
+
+    if (!response.ok) {
+      console.error('Anthropic API error:', await response.text())
+      return addCorsHeaders(Response.json(
+        { kind: 'error', message: 'AI service unavailable' },
+        { status: 502 }
+      ))
+    }
+
+    const result = await response.json() as {
+      content: Array<{ type: string; text: string }>
+    }
+
+    const text = result.content[0]?.text || '{}'
+    const parsed = JSON.parse(text) as {
+      summary: string
+      suggestedTitle: string
+      questions: string[]
+    }
+
+    return addCorsHeaders(Response.json({
+      kind: 'clarified',
+      summary: parsed.summary || '',
+      suggestedTitle: parsed.suggestedTitle || '',
+      questions: parsed.questions || [],
+    }))
+  } catch (err) {
+    console.error('Clarify error:', err)
+    return addCorsHeaders(Response.json(
+      { kind: 'error', message: 'Failed to process' },
+      { status: 500 }
+    ))
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url)
@@ -134,6 +342,14 @@ export default {
     if (path === '/api/rooms/active') {
       const rooms = await getActiveRooms(env)
       return addCorsHeaders(Response.json({ rooms }))
+    }
+
+    // Feedback endpoints (global, not room-scoped)
+    if (path === '/api/feedback' && request.method === 'POST') {
+      return handleFeedback(request, env)
+    }
+    if (path === '/api/feedback/clarify' && request.method === 'POST') {
+      return handleClarify(request, env)
     }
 
     // API routes - proxy to DO

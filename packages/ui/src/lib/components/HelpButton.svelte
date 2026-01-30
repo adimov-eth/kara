@@ -1,5 +1,8 @@
 <script lang="ts">
+  import FeedbackModal from './FeedbackModal.svelte';
+
   let isOpen = $state(false);
+  let feedbackOpen = $state(false);
 
   function toggle() {
     isOpen = !isOpen;
@@ -7,6 +10,15 @@
 
   function close() {
     isOpen = false;
+  }
+
+  function openFeedback() {
+    isOpen = false;  // Close help modal
+    feedbackOpen = true;
+  }
+
+  function closeFeedback() {
+    feedbackOpen = false;
   }
 
   function handleKeydown(e: KeyboardEvent) {
@@ -80,9 +92,17 @@
         After your first song, you can lock your name with a 6-digit PIN.
         This prevents others from using your stage name.
       </p>
+
+      <div class="divider"></div>
+
+      <button class="feedback-link" onclick={openFeedback}>
+        Send Feedback
+      </button>
     </div>
   </div>
 {/if}
+
+<FeedbackModal isOpen={feedbackOpen} onClose={closeFeedback} />
 
 <style>
   .help-btn {
@@ -235,6 +255,27 @@
     font-size: 0.9rem;
     line-height: 1.5;
     margin: 0;
+  }
+
+  .feedback-link {
+    display: block;
+    width: 100%;
+    text-align: center;
+    padding: 12px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 12px;
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    font-family: inherit;
+    cursor: pointer;
+    transition: all 0.2s ease;
+  }
+
+  .feedback-link:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--text);
+    border-color: rgba(255, 255, 255, 0.2);
   }
 
   @keyframes fadeIn {
