@@ -63,13 +63,29 @@ interface Entry {
 }
 ```
 
-## Epoch System (Fair Queue)
+## Queue Modes
 
-Prevents queue-hogging: people who wait get priority over repeat singers.
+Rooms can operate in two modes, switchable by admin:
+
+### Karaoke Mode (default)
+Epoch-based fairness: people who wait get priority over repeat singers.
 
 1. New entries get `epoch = currentEpoch`
 2. When song finishes: `currentEpoch++`
 3. Sort: epoch ASC → votes DESC → joinedAt ASC
+
+### Jukebox Mode
+Vote-based with personal stacks: democratic song selection with fair rotation.
+
+1. Each user has one song in the main queue at a time
+2. Additional songs go to personal stack (waiting list)
+3. When your song plays, next song from stack promotes to queue
+4. Sort: votes DESC → joinedAt ASC (no epochs)
+
+**Stack behavior**:
+- Add song → if no song in queue, goes to queue; otherwise to personal stack
+- Song finishes → user's next stacked song auto-promotes to queue
+- Reorder stack → drag songs in "My Stack" UI
 
 ## Routes
 
@@ -80,9 +96,23 @@ Prevents queue-hogging: people who wait get priority over repeat singers.
 | `/{room}/player` | Big screen: auto-plays queue, shows "up next" |
 | `/{room}/admin` | Admin: skip, add, reorder, remove, mode toggle |
 
-## Identity System
+## Authentication
 
-Optional PIN protection for stage names:
+Two auth methods supported:
+
+### Google OAuth
+- Click "Sign in with Google" → OAuth flow → session cookie
+- Cross-device: same Google account = same identity everywhere
+- Required for persistent personal stack in jukebox mode
+
+### Anonymous Sessions
+- Auto-created on first interaction
+- Device-bound (cleared on browser data wipe)
+- Can upgrade to Google auth later
+
+## Identity System (Legacy)
+
+Optional PIN protection for stage names (karaoke mode):
 
 1. **Unclaimed names** — Anyone can use them
 2. **After first song** — UI offers to claim name with 6-digit PIN
@@ -111,6 +141,15 @@ All endpoints require `?room={roomId}` query parameter.
 | GET | `/api/room/config` | Get room configuration |
 | POST | `/api/room/config` | Update room config (admin, mode switch) |
 | POST | `/api/admin/verify` | Verify admin PIN, get session token |
+| GET | `/api/stack` | Get personal stack + queue entry |
+| POST | `/api/stack/add` | Add song (to queue or stack) |
+| POST | `/api/stack/remove` | Remove song from personal stack |
+| POST | `/api/stack/reorder` | Reorder personal stack |
+| GET | `/auth/google` | Start Google OAuth flow |
+| GET | `/auth/callback` | OAuth callback handler |
+| GET | `/auth/session` | Get current session |
+| POST | `/auth/anonymous` | Create anonymous session |
+| POST | `/auth/logout` | Clear session |
 
 ## WebSocket Protocol
 
@@ -141,13 +180,20 @@ packages/ui/
 │   │   │   ├── room.svelte.ts  # Reactive room state (Svelte 5 runes)
 │   │   │   └── toast.svelte.ts # Toast notifications
 │   │   └── components/
-│   │       ├── Toast.svelte
-│   │       ├── NowPlaying.svelte
-│   │       ├── Entry.svelte
-│   │       ├── Queue.svelte
-│   │       ├── Search.svelte
-│   │       ├── PinModal.svelte
-│   │       └── HelpButton.svelte
+│   │       ├── AdminView.svelte    # Admin panel (mode toggle, queue control)
+│   │       ├── Entry.svelte        # Queue entry card
+│   │       ├── FeedbackModal.svelte # User feedback form
+│   │       ├── GuestView.svelte    # Main user interface
+│   │       ├── HelpButton.svelte   # Usage guide
+│   │       ├── LoginButton.svelte  # Google OAuth + anonymous auth
+│   │       ├── MyStack.svelte      # Personal song stack (jukebox mode)
+│   │       ├── NowPlaying.svelte   # Current song display
+│   │       ├── PinModal.svelte     # Name claim verification
+│   │       ├── PlayerView.svelte   # TV/venue display
+│   │       ├── PopularSongs.svelte # Room song history
+│   │       ├── Queue.svelte        # Queue list
+│   │       ├── Search.svelte       # YouTube search
+│   │       └── Toast.svelte        # Notifications
 │   └── routes/
 │       ├── +page.svelte            # Landing page (room code entry)
 │       ├── [room]/+page.svelte     # Guest view
@@ -215,12 +261,14 @@ Located at `packages/extension/`. Provides venue display control.
 | File | Purpose |
 |------|---------|
 | `packages/types/src/index.ts` | All type definitions |
-| `packages/domain/src/queue.ts` | Queue operations |
+| `packages/domain/src/queue.ts` | Queue operations, mode-aware sorting |
 | `packages/domain/src/performances.ts` | History and stats |
-| `worker/src/room.ts` | RoomDO handlers |
+| `worker/src/index.ts` | Routing, auth middleware |
+| `worker/src/room.ts` | RoomDO handlers, stack management |
+| `worker/src/auth.ts` | OAuth flow, session management |
+| `packages/ui/src/lib/api.ts` | Typed API client |
 | `packages/ui/src/lib/ws.ts` | WebSocket client |
 | `packages/ui/scripts/inline.js` | Build script |
-| `PRD.md` | Full specification |
 
 ## Making Changes
 
