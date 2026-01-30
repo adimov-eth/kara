@@ -88,13 +88,18 @@
     myEntry ? room.queue.findIndex((e) => e.id === myEntry.id) + 1 : null,
   );
   const songsUntilTurn = $derived(myPosition);
-  const canJoin = $derived(
-    myName.trim().length > 0 && validatedUrl && !isInQueue && !isMyTurn,
-  );
   const roomId = $derived(getRoomId());
   const isLoggedIn = $derived(!!session);
   const displayName = $derived(session?.displayName ?? myName);
-  const roomMode = $derived(roomConfig?.mode ?? 'jukebox');
+  const roomMode = $derived(roomConfig?.mode ?? 'karaoke');
+  const canJoin = $derived(
+    validatedUrl && !isMyTurn && (
+      // Jukebox mode: just need to be logged in
+      (roomMode === 'jukebox' && isLoggedIn) ||
+      // Karaoke mode: need name and not already in queue
+      (roomMode === 'karaoke' && myName.trim().length > 0 && !isInQueue)
+    ),
+  );
 
   // Initialize
   onMount(async () => {
@@ -330,18 +335,57 @@
   }
 
   async function handleJoin() {
-    if (!canJoin || !validatedUrl || !validatedTitle) return;
+    if (!validatedUrl || !validatedTitle) return;
+
+    const videoId = extractVideoId(validatedUrl);
+    if (!videoId) {
+      joinError = "Invalid video URL";
+      return;
+    }
 
     isJoining = true;
     joinError = null;
 
-    const isVerified = verifiedNames[myName.toLowerCase()] === true;
-    const videoId = extractVideoId(validatedUrl);
-    if (!videoId) {
-      joinError = "Invalid video URL";
+    // Jukebox mode with auth: use stack/add API
+    if (roomMode === 'jukebox' && isLoggedIn) {
+      const result = await addSong(videoId, validatedTitle);
+      isJoining = false;
+
+      switch (result.kind) {
+        case "addedToQueue":
+          toastStore.success(`Added to queue at #${result.queuePosition}!`);
+          vibrateSuccess();
+          resetForm();
+          myStackRef?.refresh();
+          break;
+        case "added":
+          toastStore.success(`Added to your stack (#${result.stackPosition} waiting)`);
+          vibrateSuccess();
+          resetForm();
+          myStackRef?.refresh();
+          break;
+        case "stackFull":
+          joinError = `Stack is full (max ${result.maxSize} songs)`;
+          break;
+        case "unauthenticated":
+          joinError = "Please sign in to add songs";
+          break;
+        case "error":
+          vibrateError();
+          joinError = result.message;
+          break;
+      }
+      return;
+    }
+
+    // Karaoke mode: use join API with name
+    if (!myName.trim()) {
+      joinError = "Enter your name";
       isJoining = false;
       return;
     }
+
+    const isVerified = verifiedNames[myName.toLowerCase()] === true;
 
     const result = await join({
       name: myName.trim(),

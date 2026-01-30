@@ -16,6 +16,7 @@
     getRoomId,
     getRoomConfig,
     setRoomMode,
+    join,
   } from '$lib';
   import { extractVideoId } from '@karaoke/domain';
   import { toastStore } from '$lib/stores/toast.svelte';
@@ -236,6 +237,41 @@
     }
   }
 
+  async function handleAddToQueue() {
+    if (!addName.trim() || !addUrl.trim()) {
+      toastStore.error('Name and URL required');
+      return;
+    }
+
+    const videoId = extractVideoId(addUrl.trim());
+    if (!videoId) {
+      toastStore.error('Invalid YouTube URL');
+      return;
+    }
+
+    const result = await join({
+      name: addName.trim(),
+      videoId,
+      title: addTitle.trim() || 'Added by admin',
+      verified: true,
+    });
+
+    if (result.kind === 'joined') {
+      toastStore.success('Added to queue!');
+      addName = '';
+      addUrl = '';
+      addTitle = '';
+      searchQuery = '';
+      searchResults = [];
+      selectedId = null;
+    } else {
+      const errorMsg = result.kind === 'error' ? result.message
+        : result.kind === 'invalidVideo' ? result.reason
+        : 'Failed to add';
+      toastStore.error(errorMsg);
+    }
+  }
+
   async function handleRemove(entryId: string) {
     if (!confirm('Remove this entry?')) return;
 
@@ -431,7 +467,7 @@
 
     <!-- Add Entry -->
     <div class="add-card">
-      <div class="add-header">Add Entry (Plays Next)</div>
+      <div class="add-header">Add Entry</div>
       <div class="add-form">
         <input
           type="text"
@@ -482,7 +518,10 @@
           placeholder="Song title"
           maxlength="100"
         />
-        <button class="btn btn-cyan" onclick={handleAdd}>Add to Front</button>
+        <div class="add-buttons">
+          <button class="btn btn-cyan" onclick={handleAddToQueue}>Add to Queue</button>
+          <button class="btn btn-warning" onclick={handleAdd}>Add to Front</button>
+        </div>
       </div>
     </div>
 
@@ -836,6 +875,15 @@
     flex-shrink: 0;
     width: auto;
     padding: 12px 16px;
+  }
+
+  .add-buttons {
+    display: flex;
+    gap: 12px;
+  }
+
+  .add-buttons .btn {
+    flex: 1;
   }
 
   .search-results {

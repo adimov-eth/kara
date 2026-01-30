@@ -171,6 +171,7 @@ interface GoogleAuthState {
 }
 
 export function getGoogleAuthUrl(
+  request: Request,
   env: Env,
   roomId: string,
   returnUrl: string
@@ -183,7 +184,7 @@ export function getGoogleAuthUrl(
 
   const params = new URLSearchParams({
     client_id: env.GOOGLE_CLIENT_ID,
-    redirect_uri: getCallbackUrl(env),
+    redirect_uri: getCallbackUrl(request),
     response_type: 'code',
     scope: 'openid email profile',
     state: base64UrlEncode(JSON.stringify(state)),
@@ -193,10 +194,9 @@ export function getGoogleAuthUrl(
   return `${GOOGLE_AUTH_URL}?${params.toString()}`
 }
 
-function getCallbackUrl(_env: Env): string {
-  // In production, use the deployed URL
-  // For local dev, wrangler uses localhost:8787
-  return 'https://bkk.lol/auth/callback'
+function getCallbackUrl(request: Request): string {
+  const url = new URL(request.url)
+  return `${url.origin}/auth/callback`
 }
 
 export function parseAuthState(stateParam: string): GoogleAuthState | null {
@@ -226,6 +226,7 @@ interface GoogleUserInfo {
 
 export async function exchangeGoogleCode(
   code: string,
+  request: Request,
   env: Env
 ): Promise<{ user: User } | { error: string }> {
   // Exchange code for tokens
@@ -236,7 +237,7 @@ export async function exchangeGoogleCode(
       code,
       client_id: env.GOOGLE_CLIENT_ID,
       client_secret: env.GOOGLE_CLIENT_SECRET,
-      redirect_uri: getCallbackUrl(env),
+      redirect_uri: getCallbackUrl(request),
       grant_type: 'authorization_code',
     }),
   })
@@ -297,7 +298,7 @@ export async function handleGoogleAuth(
   const roomId = url.searchParams.get('room') ?? 'default'
   const returnUrl = url.searchParams.get('return') ?? `/${roomId}`
 
-  const authUrl = getGoogleAuthUrl(env, roomId, returnUrl)
+  const authUrl = getGoogleAuthUrl(request, env, roomId, returnUrl)
   return Response.redirect(authUrl, 302)
 }
 
@@ -323,7 +324,7 @@ export async function handleGoogleCallback(
     return new Response('Invalid state parameter', { status: 400 })
   }
 
-  const result = await exchangeGoogleCode(code, env)
+  const result = await exchangeGoogleCode(code, request, env)
   if ('error' in result) {
     return new Response(result.error, { status: 400 })
   }

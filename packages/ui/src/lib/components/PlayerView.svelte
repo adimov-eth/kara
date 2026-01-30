@@ -1,7 +1,24 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import type { QueueState, Entry, PlaybackState } from '@karaoke/types';
-  import { createWebSocket, getState, getRoomId } from '$lib';
+  import type { QueueState, Entry, PlaybackState, SearchResult } from '@karaoke/types';
+  import {
+    createWebSocket,
+    getState,
+    getRoomId,
+    search as searchApi,
+    join,
+    adminSkip,
+    adminRemove,
+    adminReorder,
+    adminAdd,
+    verifyAdminPin,
+    getAdminToken,
+    setAdminToken,
+    clearAdminToken,
+  } from '$lib';
+  import { extractVideoId } from '@karaoke/domain';
+  import { toastStore } from '$lib/stores/toast.svelte';
+  import Toast from './Toast.svelte';
 
   const PAUSE_DURATION = 7000;
   const SYNC_DRIFT_THRESHOLD_MS = 200; // Re-sync if drift exceeds 200ms
@@ -37,12 +54,33 @@
   let syncCheckInterval: ReturnType<typeof setInterval> | null = null;
   let lastSyncPlayback: PlaybackState | null = null;
 
+  // Controls panel state
+  let showControls = $state(true);
+  let isAdminMode = $state(false);
+  let adminPinInput = $state('');
+  let showPinModal = $state(false);
+  let isAuthenticating = $state(false);
+  let authError = $state('');
+
+  // Search state
+  let searchQuery = $state('');
+  let searchResults = $state<SearchResult[]>([]);
+  let isSearching = $state(false);
+  let selectedResult = $state<SearchResult | null>(null);
+  let singerName = $state('');
+
   // Derived
   const upNext = $derived(room.queue.slice(0, 5));
   const qrUrl = $derived(`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(`https://karaoke-queue.boris-47d.workers.dev/${roomId}`)}&bgcolor=0a0a0f&color=ffffff`);
 
   onMount(() => {
     roomId = getRoomId();
+
+    // Check for existing admin token
+    const token = getAdminToken();
+    if (token) {
+      isAdminMode = true;
+    }
 
     ws.onState((newState, playback) => {
       wsConnected = true;
@@ -342,6 +380,201 @@
   }
 
   const connectionStatus = $derived(getConnectionStatus());
+
+  // =============================================================================
+  // Controls Panel Functions
+  // =============================================================================
+
+  function toggleControls() {
+    showControls = !showControls;
+  }
+
+  function openPinModal() {
+    showPinModal = true;
+    adminPinInput = '';
+    authError = '';
+  }
+
+  function closePinModal() {
+    showPinModal = false;
+    adminPinInput = '';
+    authError = '';
+  }
+
+  async function handlePinSubmit() {
+    if (adminPinInput.length !== 6) {
+      authError = 'PIN must be 6 digits';
+      return;
+    }
+
+    isAuthenticating = true;
+    authError = '';
+
+    const result = await verifyAdminPin(adminPinInput);
+
+    isAuthenticating = false;
+
+    if (result.kind === 'verified') {
+      setAdminToken(result.token);
+      isAdminMode = true;
+      showPinModal = false;
+      adminPinInput = '';
+      toastStore.success('Admin mode enabled');
+    } else if (result.kind === 'invalidPin') {
+      authError = 'Incorrect PIN';
+      adminPinInput = '';
+    } else if (result.kind === 'roomNotFound') {
+      authError = 'Room not found';
+    } else {
+      authError = result.message || 'Authentication failed';
+    }
+  }
+
+  function handlePinKeydown(e: KeyboardEvent) {
+    if (e.key === 'Enter' && !isAuthenticating) {
+      handlePinSubmit();
+    } else if (e.key === 'Escape') {
+      closePinModal();
+    }
+  }
+
+  function handleAdminLogout() {
+    clearAdminToken();
+    isAdminMode = false;
+    toastStore.success('Admin mode disabled');
+  }
+
+  async function handleSearch() {
+    if (!searchQuery.trim() || isSearching) return;
+
+    isSearching = true;
+    searchResults = [];
+    selectedResult = null;
+
+    const response = await searchApi(searchQuery.trim());
+    isSearching = false;
+
+    if (response.kind === 'error') {
+      toastStore.error(response.message);
+      return;
+    }
+
+    searchResults = response.results;
+  }
+
+  function selectSearchResult(result: SearchResult) {
+    selectedResult = result;
+  }
+
+  function clearSearch() {
+    searchQuery = '';
+    searchResults = [];
+    selectedResult = null;
+    singerName = '';
+  }
+
+  async function handleAddToQueue() {
+    if (!selectedResult) {
+      toastStore.error('Select a song first');
+      return;
+    }
+    if (!singerName.trim()) {
+      toastStore.error('Enter singer name');
+      return;
+    }
+
+    const result = await join({
+      name: singerName.trim(),
+      videoId: selectedResult.id,
+      title: selectedResult.title,
+      verified: true,
+    });
+
+    if (result.kind === 'joined') {
+      toastStore.success('Added to queue!');
+      clearSearch();
+    } else {
+      const errorMsg = result.kind === 'error' ? result.message
+        : result.kind === 'invalidVideo' ? result.reason
+        : 'Failed to add';
+      toastStore.error(errorMsg);
+    }
+  }
+
+  async function handleAddToFront() {
+    if (!selectedResult) {
+      toastStore.error('Select a song first');
+      return;
+    }
+    if (!singerName.trim()) {
+      toastStore.error('Enter singer name');
+      return;
+    }
+
+    const result = await adminAdd({
+      name: singerName.trim(),
+      videoId: selectedResult.id,
+      title: selectedResult.title,
+    });
+
+    if (result.kind === 'joined') {
+      toastStore.success('Added to front!');
+      clearSearch();
+    } else {
+      const errorMsg = result.kind === 'error' ? result.message
+        : result.kind === 'invalidVideo' ? result.reason
+        : 'Failed to add';
+      toastStore.error(errorMsg);
+    }
+  }
+
+  async function handleSkip() {
+    const result = await adminSkip();
+    if (result.kind === 'skipped') {
+      toastStore.success('Skipped!');
+    } else {
+      const errorMsg = result.kind === 'error' ? result.message
+        : result.kind === 'nothingPlaying' ? 'Nothing is playing'
+        : result.kind === 'unauthorized' ? 'Session expired'
+        : 'Failed to skip';
+      if (result.kind === 'unauthorized') handleAdminLogout();
+      toastStore.error(errorMsg);
+    }
+  }
+
+  async function handleRemove(entryId: string) {
+    const result = await adminRemove(entryId);
+    if (result.kind !== 'removed') {
+      const errorMsg = result.kind === 'error' ? result.message
+        : result.kind === 'entryNotFound' ? 'Entry not found'
+        : result.kind === 'unauthorized' ? 'Session expired'
+        : 'Failed to remove';
+      if (result.kind === 'unauthorized') handleAdminLogout();
+      toastStore.error(errorMsg);
+    }
+  }
+
+  async function handleMoveUp(entryId: string) {
+    const index = room.queue.findIndex(e => e.id === entryId);
+    if (index <= 0) return;
+
+    const result = await adminReorder(entryId, index - 1);
+    if (result.kind !== 'reordered') {
+      const errorMsg = result.kind === 'error' ? result.message : 'Failed to move';
+      toastStore.error(errorMsg);
+    }
+  }
+
+  async function handleMoveDown(entryId: string) {
+    const index = room.queue.findIndex(e => e.id === entryId);
+    if (index === -1 || index >= room.queue.length - 1) return;
+
+    const result = await adminReorder(entryId, index + 1);
+    if (result.kind !== 'reordered') {
+      const errorMsg = result.kind === 'error' ? result.message : 'Failed to move';
+      toastStore.error(errorMsg);
+    }
+  }
 </script>
 
 <div class="player-container">
@@ -422,12 +655,15 @@
 
   <!-- Info Bar: Always visible during playback -->
   {#if playerMode === 'playing_song'}
-    <div class="info-bar">
+    <div class="info-bar" class:with-controls={showControls}>
       {#if room.nowPlaying}
         <div class="now-playing">
           <span class="now-label">Now Playing</span>
           <span class="now-title">{room.nowPlaying.title}</span>
           <span class="now-singer">{room.nowPlaying.name}</span>
+          {#if isAdminMode}
+            <button class="skip-btn" onclick={handleSkip} title="Skip">⏭</button>
+          {/if}
         </div>
       {/if}
 
@@ -437,10 +673,21 @@
           {#if upNext.length === 0}
             <span class="empty-queue">Queue empty</span>
           {:else}
-            {#each upNext.slice(0, 3) as entry (entry.id)}
+            {#each upNext.slice(0, 3) as entry, i (entry.id)}
               <div class="up-next-item">
                 <div class="up-next-song">{entry.title}</div>
                 <div class="up-next-singer">{entry.name}</div>
+                {#if isAdminMode}
+                  <div class="up-next-actions">
+                    {#if i > 0}
+                      <button class="action-btn" onclick={() => handleMoveUp(entry.id)} title="Move up">↑</button>
+                    {/if}
+                    {#if i < upNext.length - 1}
+                      <button class="action-btn" onclick={() => handleMoveDown(entry.id)} title="Move down">↓</button>
+                    {/if}
+                    <button class="action-btn danger" onclick={() => handleRemove(entry.id)} title="Remove">×</button>
+                  </div>
+                {/if}
               </div>
             {/each}
           {/if}
@@ -448,7 +695,119 @@
       </div>
     </div>
   {/if}
+
+  <!-- Controls Panel -->
+  {#if showControls}
+    <div class="controls-panel">
+      <div class="controls-row">
+        <!-- Search Section -->
+        <div class="search-section">
+          <div class="search-input-row">
+            <input
+              type="text"
+              class="search-input"
+              placeholder="Search for a song..."
+              bind:value={searchQuery}
+              onkeypress={(e) => e.key === 'Enter' && handleSearch()}
+            />
+            <button class="btn btn-cyan search-btn" onclick={handleSearch} disabled={isSearching}>
+              {isSearching ? '...' : 'Search'}
+            </button>
+          </div>
+
+          {#if searchResults.length > 0}
+            <div class="search-results-dropdown">
+              {#each searchResults.slice(0, 5) as result (result.id)}
+                <button
+                  class="search-result-item"
+                  class:selected={selectedResult?.id === result.id}
+                  onclick={() => selectSearchResult(result)}
+                >
+                  <img class="result-thumb" src={result.thumbnail} alt="" />
+                  <div class="result-info">
+                    <div class="result-title">{result.title}</div>
+                    <div class="result-meta">{result.channel}</div>
+                  </div>
+                </button>
+              {/each}
+            </div>
+          {/if}
+
+          {#if selectedResult}
+            <div class="selected-song">
+              <span class="selected-title">{selectedResult.title}</span>
+              <input
+                type="text"
+                class="singer-input"
+                placeholder="Singer name"
+                bind:value={singerName}
+                maxlength="30"
+              />
+              <div class="add-actions">
+                <button class="btn btn-cyan" onclick={handleAddToQueue}>Add</button>
+                {#if isAdminMode}
+                  <button class="btn btn-warning" onclick={handleAddToFront}>Front</button>
+                {/if}
+                <button class="btn btn-muted" onclick={clearSearch}>×</button>
+              </div>
+            </div>
+          {/if}
+        </div>
+
+        <!-- Admin Toggle -->
+        <div class="admin-section">
+          {#if isAdminMode}
+            <button class="admin-btn unlocked" onclick={handleAdminLogout} title="Logout">
+              🔓
+            </button>
+          {:else}
+            <button class="admin-btn locked" onclick={openPinModal} title="Admin Login">
+              🔒
+            </button>
+          {/if}
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  <!-- Toggle Controls Button -->
+  <button class="toggle-controls-btn" onclick={toggleControls} title={showControls ? 'Hide controls' : 'Show controls'}>
+    {showControls ? '▼' : '▲'}
+  </button>
+
+  <!-- PIN Modal -->
+  {#if showPinModal}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="modal-overlay" onclick={closePinModal}>
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+      <div class="modal-content" onclick={(e) => e.stopPropagation()}>
+        <h3>Admin Login</h3>
+        <input
+          type="password"
+          inputmode="numeric"
+          pattern="[0-9]*"
+          maxlength="6"
+          placeholder="Enter PIN"
+          bind:value={adminPinInput}
+          onkeydown={handlePinKeydown}
+          disabled={isAuthenticating}
+        />
+        <div class="modal-actions">
+          <button class="btn" onclick={handlePinSubmit} disabled={isAuthenticating || adminPinInput.length !== 6}>
+            {isAuthenticating ? 'Verifying...' : 'Login'}
+          </button>
+          <button class="btn btn-muted" onclick={closePinModal}>Cancel</button>
+        </div>
+        {#if authError}
+          <div class="auth-error">{authError}</div>
+        {/if}
+      </div>
+    </div>
+  {/if}
 </div>
+
+<!-- Toast notifications -->
+<Toast />
 
 <style>
   .player-container {
@@ -844,5 +1203,375 @@
     background: rgba(255, 107, 129, 0.2);
     color: #ff6b81;
     border: 1px solid rgba(255, 107, 129, 0.3);
+  }
+
+  /* Info bar adjustments for controls */
+  .info-bar.with-controls {
+    bottom: 70px;
+  }
+
+  .skip-btn {
+    background: rgba(255, 165, 2, 0.2);
+    border: 1px solid rgba(255, 165, 2, 0.3);
+    color: var(--warning);
+    padding: 8px 16px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 1.2rem;
+    margin-left: 16px;
+    transition: all 0.2s;
+  }
+
+  .skip-btn:hover {
+    background: rgba(255, 165, 2, 0.3);
+  }
+
+  .up-next-item {
+    position: relative;
+  }
+
+  .up-next-actions {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    display: flex;
+    gap: 2px;
+  }
+
+  .action-btn {
+    background: rgba(255, 255, 255, 0.1);
+    border: none;
+    color: var(--text-muted);
+    width: 24px;
+    height: 24px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s;
+  }
+
+  .action-btn:hover {
+    background: rgba(255, 255, 255, 0.2);
+    color: var(--text);
+  }
+
+  .action-btn.danger:hover {
+    background: rgba(255, 107, 157, 0.3);
+    color: var(--accent);
+  }
+
+  /* Controls Panel */
+  .controls-panel {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: rgba(10, 10, 15, 0.95);
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    padding: 12px 24px;
+    z-index: 50;
+  }
+
+  .controls-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 16px;
+  }
+
+  .search-section {
+    flex: 1;
+    position: relative;
+  }
+
+  .search-input-row {
+    display: flex;
+    gap: 8px;
+  }
+
+  .search-input {
+    flex: 1;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    padding: 10px 14px;
+    color: var(--text);
+    font-size: 0.9rem;
+    font-family: inherit;
+  }
+
+  .search-input:focus {
+    outline: none;
+    border-color: var(--cyan);
+  }
+
+  .search-input::placeholder {
+    color: var(--text-muted);
+  }
+
+  .search-btn {
+    padding: 10px 16px;
+    font-size: 0.85rem;
+  }
+
+  .search-results-dropdown {
+    position: absolute;
+    bottom: 100%;
+    left: 0;
+    right: 0;
+    background: var(--bg-card);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 12px;
+    margin-bottom: 8px;
+    max-height: 300px;
+    overflow-y: auto;
+    z-index: 100;
+  }
+
+  .search-result-item {
+    display: flex;
+    gap: 10px;
+    padding: 10px 12px;
+    background: transparent;
+    border: none;
+    width: 100%;
+    text-align: left;
+    cursor: pointer;
+    font-family: inherit;
+    color: var(--text);
+    transition: background 0.2s;
+  }
+
+  .search-result-item:hover {
+    background: rgba(255, 255, 255, 0.05);
+  }
+
+  .search-result-item.selected {
+    background: rgba(78, 205, 196, 0.15);
+  }
+
+  .result-thumb {
+    width: 48px;
+    height: 36px;
+    border-radius: 4px;
+    object-fit: cover;
+  }
+
+  .result-info {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .result-title {
+    font-size: 0.85rem;
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .result-meta {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+  }
+
+  .selected-song {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 8px;
+    padding: 8px 12px;
+    background: rgba(78, 205, 196, 0.1);
+    border-radius: 8px;
+  }
+
+  .selected-title {
+    flex: 1;
+    font-size: 0.85rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--cyan);
+  }
+
+  .singer-input {
+    width: 120px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 6px;
+    padding: 6px 10px;
+    color: var(--text);
+    font-size: 0.85rem;
+    font-family: inherit;
+  }
+
+  .singer-input:focus {
+    outline: none;
+    border-color: var(--cyan);
+  }
+
+  .add-actions {
+    display: flex;
+    gap: 6px;
+  }
+
+  .add-actions .btn {
+    padding: 6px 12px;
+    font-size: 0.8rem;
+  }
+
+  .admin-section {
+    display: flex;
+    align-items: center;
+  }
+
+  .admin-btn {
+    background: none;
+    border: none;
+    font-size: 1.5rem;
+    cursor: pointer;
+    padding: 8px;
+    border-radius: 8px;
+    transition: all 0.2s;
+  }
+
+  .admin-btn.locked:hover {
+    background: rgba(255, 255, 255, 0.1);
+  }
+
+  .admin-btn.unlocked {
+    background: rgba(78, 205, 196, 0.2);
+  }
+
+  .admin-btn.unlocked:hover {
+    background: rgba(78, 205, 196, 0.3);
+  }
+
+  .toggle-controls-btn {
+    position: absolute;
+    bottom: 0;
+    right: 20px;
+    transform: translateY(-100%);
+    background: rgba(10, 10, 15, 0.9);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-bottom: none;
+    border-radius: 8px 8px 0 0;
+    color: var(--text-muted);
+    padding: 4px 12px;
+    font-size: 0.8rem;
+    cursor: pointer;
+    z-index: 51;
+    transition: all 0.2s;
+  }
+
+  .toggle-controls-btn:hover {
+    color: var(--text);
+    background: rgba(10, 10, 15, 1);
+  }
+
+  /* Modal */
+  .modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.8);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 200;
+  }
+
+  .modal-content {
+    background: var(--bg-card);
+    border-radius: 16px;
+    padding: 24px;
+    min-width: 280px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+  }
+
+  .modal-content h3 {
+    margin: 0 0 16px;
+    font-size: 1.25rem;
+    text-align: center;
+  }
+
+  .modal-content input {
+    width: 100%;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    padding: 12px;
+    color: var(--text);
+    font-size: 1.25rem;
+    text-align: center;
+    letter-spacing: 0.5em;
+    font-family: inherit;
+    margin-bottom: 16px;
+  }
+
+  .modal-content input:focus {
+    outline: none;
+    border-color: var(--cyan);
+  }
+
+  .modal-actions {
+    display: flex;
+    gap: 8px;
+  }
+
+  .modal-actions .btn {
+    flex: 1;
+  }
+
+  .auth-error {
+    color: var(--accent);
+    font-size: 0.85rem;
+    text-align: center;
+    margin-top: 12px;
+  }
+
+  /* Button styles for controls */
+  .btn {
+    background: var(--accent);
+    border: none;
+    color: white;
+    padding: 10px 20px;
+    border-radius: 8px;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .btn:hover:not(:disabled) {
+    filter: brightness(1.1);
+    transform: translateY(-1px);
+  }
+
+  .btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .btn-cyan {
+    background: var(--cyan);
+  }
+
+  .btn-warning {
+    background: var(--warning);
+  }
+
+  .btn-muted {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--text-muted);
+  }
+
+  .btn-muted:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.2);
+    color: var(--text);
   }
 </style>
