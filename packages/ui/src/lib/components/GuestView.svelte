@@ -93,11 +93,11 @@
   const displayName = $derived(session?.displayName ?? myName);
   const roomMode = $derived(roomConfig?.mode ?? 'karaoke');
   const canJoin = $derived(
-    validatedUrl && !isMyTurn && (
-      // Jukebox mode: just need to be logged in
+    validatedUrl && (
+      // Jukebox mode: just need to be logged in (can always add to stack)
       (roomMode === 'jukebox' && isLoggedIn) ||
-      // Karaoke mode: need name and not already in queue
-      (roomMode === 'karaoke' && myName.trim().length > 0 && !isInQueue)
+      // Karaoke mode: need name and not already in queue or playing
+      (roomMode === 'karaoke' && myName.trim().length > 0 && !isInQueue && !isMyTurn)
     ),
   );
 
@@ -591,7 +591,7 @@
     </div>
   {/if}
 
-  {#if myEntry}
+  {#if myEntry && roomMode === 'karaoke'}
     <div class="my-song-card">
       <div class="my-song-header">
         <span class="my-song-label">Your song</span>
@@ -604,7 +604,7 @@
         Change Song
       </button>
     </div>
-  {:else if isMyTurn}
+  {:else if isMyTurn && roomMode === 'karaoke'}
     <div class="my-turn-card">
       <div class="my-turn-label">You're up!</div>
       <div class="my-turn-song">{room.nowPlaying?.title}</div>
@@ -612,23 +612,29 @@
         Skip My Song
       </button>
     </div>
-  {:else}
+  {/if}
+
+  <!-- Jukebox mode: always show add form -->
+  <!-- Karaoke mode: only show when not in queue and not playing -->
+  {#if roomMode === 'jukebox' || (!myEntry && !isMyTurn)}
     <div class="join-card">
-      <div class="input-group">
-        <label class="input-label" for="nameInput">Your name</label>
-        <input
-          type="text"
-          id="nameInput"
-          placeholder="Enter your name"
-          maxlength="30"
-          autocomplete="off"
-          value={myName}
-          oninput={handleNameInput}
-        />
-      </div>
+      {#if roomMode === 'karaoke'}
+        <div class="input-group">
+          <label class="input-label" for="nameInput">Your name</label>
+          <input
+            type="text"
+            id="nameInput"
+            placeholder="Enter your name"
+            maxlength="30"
+            autocomplete="off"
+            value={myName}
+            oninput={handleNameInput}
+          />
+        </div>
+      {/if}
 
       <div class="input-group">
-        <span class="input-label">Search for a song</span>
+        <span class="input-label">{roomMode === 'jukebox' ? 'Add another song' : 'Search for a song'}</span>
         <Search maxDuration={MAX_DURATION} onSelect={handleSongSelect} />
 
         {#if !selectedSong}
@@ -655,7 +661,7 @@
       </div>
 
       <button class="btn" onclick={handleJoin} disabled={!canJoin || isJoining}>
-        Add to Queue
+        {roomMode === 'jukebox' ? 'Add to Stack' : 'Add to Queue'}
       </button>
 
       {#if joinError}
