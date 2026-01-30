@@ -9,34 +9,36 @@ Goal: give hosts fast, confident control with minimal clicks and clear session s
 4) Optionally view history and popular songs  
 
 ## High‑Impact Improvements
-### A1) Fast Reorder Controls
-**Problem**: Reordering is slow (repeated “move up/down”).  
-**Solution**:  
-- Add “Make Next” button for any entry  
-- Add drag‑and‑drop for power users  
-**Files**: `packages/ui/src/lib/components/AdminView.svelte`  
+### A1) Fast Reorder Controls `[PARTIAL]`
+**Problem**: Reordering is slow (repeated "move up/down").
+**Solution**:
+- Add "Make Next" button for any entry `[PROPOSED]`
+- Add drag‑and‑drop for power users `[PROPOSED]`
+**Current**: Move up/down arrows on each entry (implemented in AdminView and PlayerView admin mode).
+**Files**: `packages/ui/src/lib/components/AdminView.svelte`, `PlayerView.svelte`
 **Acceptance**: 1 click moves to position 1; drag reorders persist
 
-### A2) Admin Session Clarity
-**Problem**: Token expiration appears as “unauthorized” mid‑action.  
-**Solution**:  
-- Show top banner: “Session expired — re‑enter PIN”  
-- Auto‑open PIN modal when expired  
+### A2) Admin Session Clarity `[PARTIAL]`
+**Problem**: Token expiration appears as "unauthorized" mid‑action.
+**Solution**:
+- Show top banner: "Session expired — re‑enter PIN" `[PROPOSED]`
+- Auto‑open PIN modal when expired `[PROPOSED]`
+**Current**: Admin token stored in sessionStorage; manual re-auth required.
 **Files**: `AdminView.svelte`, `packages/ui/src/lib/api.ts`
 
-### A3) Extension Status Visibility
-**Problem**: Host unsure if extension is connected.  
-**Solution**: “Auto‑play: Connected/Disconnected” banner with instructions.  
+### A3) Extension Status Visibility `[PROPOSED]`
+**Problem**: Host unsure if extension is connected.
+**Solution**: "Auto‑play: Connected/Disconnected" banner with instructions.
 **Files**: `AdminView.svelte` (use WS `extensionConnected`)
 
-### A4) Bulk Actions
-**Problem**: Removing spam entries takes too long.  
-**Solution**: multi‑select + “Remove selected” button.  
+### A4) Bulk Actions `[PROPOSED]`
+**Problem**: Removing spam entries takes too long.
+**Solution**: multi‑select + "Remove selected" button.
 **Files**: `AdminView.svelte`, `RoomDO` endpoint or repeated calls
 
-### A5) Error Recovery Copy
-**Problem**: Error messages are generic.  
-**Solution**: Replace “Failed” with actionable guidance (re‑login, refresh, retry).  
+### A5) Error Recovery Copy `[PROPOSED]`
+**Problem**: Error messages are generic.
+**Solution**: Replace "Failed" with actionable guidance (re‑login, refresh, retry).
 **Files**: `AdminView.svelte`, `api.ts`
 
 ## Info Architecture Improvements
@@ -45,31 +47,35 @@ Goal: give hosts fast, confident control with minimal clicks and clear session s
 - **Search + Add**: combine search results + select + add in one flow.
 
 ## Operational UX
-### Admin “Heartbeat”
-Show a small indicator if WS is connected and room state is fresh.  
+### Admin "Heartbeat" `[PROPOSED]`
+Show a small indicator if WS is connected and room state is fresh.
 **Acceptance**: visible when polling fallback is active.
 
-### Skip Consensus Control
+### Skip Consensus Control `[PROPOSED]`
 Skipping the current song requires a **2/3 vote** from active guests.
 Admin can initiate a skip vote and see progress in real time.
 Admin override is allowed for emergencies.
+**Current**: Admin-only skip or singer can skip their own song.
 
-### Clear Permissions Model
-If admin auth is required, always show “Room is protected” and provide PIN flow.
+### Clear Permissions Model `[IMPLEMENTED]`
+If admin auth is required, always show "Room is protected" and provide PIN flow.
+**Current**: PIN modal on admin view, token stored in sessionStorage.
 
 ## Edge Cases
-- Room not found or deleted → clear message + option to create new room  
-- Extension disconnected → prompt user to open extension  
-- Stale queue after idle → refresh prompt
-- Skip vote never reaches 2/3 → auto-expire vote with a clear message
-- User stack abuse → provide admin option to clear a guest’s stack
+- Room not found or deleted → clear message + option to create new room `[IMPLEMENTED]`
+- Extension disconnected → prompt user to open extension `[PROPOSED]`
+- Stale queue after idle → refresh prompt `[PROPOSED]`
+- Skip vote never reaches 2/3 → auto-expire vote with a clear message `[PROPOSED]`
+- User stack abuse → provide admin option to clear a guest's stack `[PROPOSED]`
 
 ## Implementation Checklist
-1) Add extension status banner.  
-2) Add “Make Next” action.  
-3) Add session expired banner + re‑auth flow.  
-4) Add multi‑select remove.  
-5) Add drag‑and‑drop reorder.
+1) Add extension status banner `[PROPOSED]`
+2) Add "Make Next" action `[PROPOSED]`
+3) Add session expired banner + re‑auth flow `[PROPOSED]`
+4) Add multi‑select remove `[PROPOSED]`
+5) Add drag‑and‑drop reorder `[PROPOSED]`
+6) Player view admin controls ✅ (search, skip, reorder, remove)
+7) "Add to Queue" + "Add to Front" options ✅
 
 ## Done‑Definition (Admin)
 - Host can move a song to top in one click  

@@ -19,80 +19,94 @@ and “confidence builders” that prevent confusion in a loud, social environme
 - `docs/UX_ADMIN.md` — admin tooling, moderation, and session UX
 
 ## Guest Experience (Phone)
-### G1) Quick‑Join Name Chip
-**Problem**: Re‑typing a name is friction, especially for repeat singers.  
-**Solution**: Show a “Continue as {name}” chip if localStorage has a name, plus a small edit icon.  
+### G1) Quick‑Join Name Chip `[PROPOSED]`
+**Problem**: Re‑typing a name is friction, especially for repeat singers.
+**Solution**: Show a "Continue as {name}" chip if localStorage has a name, plus a small edit icon.
 **Impact**: Reduces entry time; increases re‑use and adoption.
 
-### G2) Sticky “Your Turn” Card with ETA
-**Problem**: Users don’t know when they’ll sing.  
-**Solution**: A fixed card at the top showing position + ETA (avg song length × songs ahead).  
+### G2) Sticky "Your Turn" Card with ETA `[PROPOSED]`
+**Problem**: Users don't know when they'll sing.
+**Solution**: A fixed card at the top showing position + ETA (avg song length × songs ahead).
 **Impact**: Reduces anxiety; improves perception of fairness.
 
-### G3) Connection State Pill
-**Problem**: Users don’t know if updates are live or stale.  
-**Solution**: Show **Realtime / Polling / Offline** status based on WS state.  
+### G3) Connection State Pill `[PARTIAL]`
+**Problem**: Users don't know if updates are live or stale.
+**Solution**: Show **Realtime / Polling / Offline** status based on WS state.
+**Current**: Implemented in PlayerView; pending for GuestView.
 **Impact**: Builds trust, reduces confusion after network drops.
 
-### G4) Search Flow Polishing
-**Problem**: Unclear why a result is unselectable.  
-**Solution**: Explicit “Too long (max 7 minutes)” overlay + tooltip; allow clearing search quickly.  
+### G4) Search Flow Polishing `[PROPOSED]`
+**Problem**: Unclear why a result is unselectable.
+**Solution**: Explicit "Too long (max 7 minutes)" overlay + tooltip; allow clearing search quickly.
 **Impact**: Fewer failed joins and frustrated taps.
 
-### G5) Vote Feedback & Undo
-**Problem**: Votes feel noisy if state updates lag.  
-**Solution**: Animate vote deltas and allow undo for a few seconds.  
+### G5) Vote Feedback & Undo `[PROPOSED]`
+**Problem**: Votes feel noisy if state updates lag.
+**Solution**: Animate vote deltas and allow undo for a few seconds.
 **Impact**: Feels responsive and forgiving.
 
 ## Queue & Fairness UX
-### Q1) Explain Reordering
-**Problem**: Users see the queue shift unexpectedly.  
-**Solution**: Add a “Fairness” tip near the queue or in Help: “new singers come first.”  
+### Q1) Explain Reordering `[PROPOSED]`
+**Problem**: Users see the queue shift unexpectedly.
+**Solution**: Add a "Fairness" tip near the queue or in Help: "new singers come first."
 **Impact**: Reduces perceived unfairness.
 
-### Q2) Queue Caps Visibility
-**Problem**: Some guests add too many songs.  
-**Solution**: Surface a limit (if enabled) before they join.  
+### Q2) Queue Caps Visibility `[PROPOSED]`
+**Problem**: Some guests add too many songs.
+**Solution**: Surface a limit (if enabled) before they join.
 **Impact**: Prevents conflict; reduces admin load.
 
 ## Player (TV / Venue Screen)
-### P1) Autoplay Recovery Overlay
-**Problem**: Autoplay restrictions can block playback.  
-**Solution**: If player is blocked, show “Click to enable playback” overlay.  
+### P1) Autoplay Recovery Overlay `[PROPOSED]`
+**Problem**: Autoplay restrictions can block playback.
+**Solution**: If player is blocked, show "Click to enable playback" overlay.
 **Impact**: Prevents dead air.
 
-### P2) Idle State with QR
-**Problem**: When no songs are queued, the screen feels dead.  
-**Solution**: Show QR + short invite: “Scan to join the queue.”  
+### P2) Idle State with QR `[IMPLEMENTED]`
+**Problem**: When no songs are queued, the screen feels dead.
+**Solution**: Show QR + short invite: "Scan to join the queue."
+**Current**: PlayerView shows room URL when idle.
 **Impact**: Encourages participation.
 
-### P3) Extension Status Banner (Host View)
-**Problem**: Hosts don’t know if the extension is active.  
-**Solution**: Show connected/disconnected badge with a link to instructions.  
+### P3) Extension Status Banner (Host View) `[PROPOSED]`
+**Problem**: Hosts don't know if the extension is active.
+**Solution**: Show connected/disconnected badge with a link to instructions.
 **Impact**: Reduces troubleshooting time.
 
+### P4) Player Controls Panel `[IMPLEMENTED]`
+**Problem**: PC/venue operators need quick control without switching to admin view.
+**Solution**: Search + add songs, admin mode toggle with skip/reorder/remove.
+**Current**: Full controls panel in PlayerView with PIN-protected admin mode.
+
 ## Admin Experience
-### A1) Fast Reorder Controls
-**Problem**: Moving songs is slow with repeated clicks.  
-**Solution**: “Make next” button + drag‑and‑drop reorder.  
+### A1) Fast Reorder Controls `[PARTIAL]`
+**Problem**: Moving songs is slow with repeated clicks.
+**Solution**: "Make next" button + drag‑and‑drop reorder.
+**Current**: Move up/down arrows implemented; "Make next" and drag-and-drop pending.
 **Impact**: Faster moderation.
 
-### A2) Admin Session Clarity
-**Problem**: Sessions can expire silently.  
-**Solution**: When token is invalid, show “Session expired, please re‑enter PIN.”  
+### A2) Admin Session Clarity `[PARTIAL]`
+**Problem**: Sessions can expire silently.
+**Solution**: When token is invalid, show "Session expired, please re‑enter PIN."
+**Current**: Token stored in sessionStorage; manual re-auth required.
 **Impact**: Avoids confusion.
 
-### A3) Bulk Actions
-**Problem**: Clearing spam or duplicates is tedious.  
-**Solution**: Allow multi‑select remove for admin.  
+### A3) Bulk Actions `[PROPOSED]`
+**Problem**: Clearing spam or duplicates is tedious.
+**Solution**: Allow multi‑select remove for admin.
 **Impact**: Faster queue hygiene.
 
+### A4) Add to Queue Option `[IMPLEMENTED]`
+**Problem**: Admin could only add songs to front (priority).
+**Solution**: Two buttons: "Add to Queue" (normal position) + "Add to Front" (priority).
+**Current**: Both options available in AdminView and PlayerView admin mode.
+
 ## UX‑Driven Technical Additions
-### T1) State Version + Idempotency
+### T1) State Version + Idempotency `[PROPOSED]`
 Add a `stateVersion` and idempotent `requestId` for client actions to reduce inconsistent UI
 after retries or out‑of‑order events. (See `research/CONSENSUS.md`.)
 
-### T2) Client‑side Caching of Queue State
+### T2) Client‑side Caching of Queue State `[PROPOSED]`
 Persist last known state and replay on load to avoid blank screens during reconnect.
 
 ## Proposed Implementation Order

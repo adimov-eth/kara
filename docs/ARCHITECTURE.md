@@ -68,15 +68,13 @@ Optional venue auto‑player:
 - Optimistic advance minimizes dead air.
 
 ## Data Model (Highlights)
-- **QueueState**: `queue`, `nowPlaying`, `currentRound`.
-- **Entry**: name, videoId, title, votes, round, joinedAt.
-- **UserSongStack (planned)**: per‑user list of future songs, auto‑queued when their turn completes.
+- **QueueState**: `queue`, `nowPlaying`, `currentEpoch`.
+- **Entry**: name, videoId, title, votes, epoch, joinedAt.
+- **UserSongStack** `[IMPLEMENTED]`: per‑user list of future songs, auto‑queued when their song plays (jukebox mode).
 - **Performance**: playback history with outcomes.
-- **Identity**: name + salted PIN hash.
+- **Identity**: name + salted PIN hash (karaoke mode).
+- **UserSession** `[IMPLEMENTED]`: JWT session for Google OAuth or anonymous auth (jukebox mode).
 - **AdminSession**: ephemeral token with expiry.
-
-Note: the current implementation uses `epoch` as the round index; the plan is to
-rename to `round` for clarity while preserving behavior.
 
 ## Core Flows
 ### Join Queue
@@ -94,10 +92,10 @@ rename to `round` for clarity while preserving behavior.
 2. DO records performance history, advances queue, updates playback sync.
 3. Broadcast new state.
 
-### Auto‑Queue from Song Stack (planned)
-1. User preselects a list of songs (“stack”).
-2. When their current song ends, the next stack item is enqueued in the **next round**.
-3. Votes apply normally based on mode (fair queue or jukebox).
+### Auto‑Queue from Song Stack `[IMPLEMENTED]`
+1. User preselects a list of songs ("stack") in jukebox mode.
+2. When their song plays, the next stack item auto-promotes to the main queue.
+3. One song per user in queue at a time; extras wait in personal stack.
 
 ### Playback Sync (Player Screens)
 1. DO publishes `playback` state via WebSocket.
@@ -128,19 +126,21 @@ allowing votes to matter.
 - If you rejoin after singing, your new entry is placed in the **next round**.
 - Votes reorder within a round by default.
 
-**Jukebox mode (optional)**:
-- Admin can allow votes to **cross rounds** so highly‑upvoted songs rise to the top.
-- This never preempts the currently playing song; it only affects “next.”
+**Jukebox mode** `[IMPLEMENTED]`:
+- Session-based identity (Google OAuth or anonymous).
+- One song per user in queue; extras go to personal stack.
+- Sort by votes only (no epochs).
+- Auto-promote from stack when your song plays.
 
-### Skip Consensus (policy)
-Skipping the currently playing song requires a **2/3 majority vote** of active guests.
-This prevents a single admin or small clique from disrupting the flow.
+### Skip Policy `[PARTIAL]`
+Currently: Admin-only skip. The singer can also skip their own song.
 
-Open question to lock down during implementation:
-- Define the denominator for “active guests” (connected clients? recent voters? last N minutes).
-Additional rules:
-- Skip votes **reset per song**.
-- Admin can **override** the consensus requirement when needed.
+`[PROPOSED]` **Skip Consensus**: Require 2/3 majority vote of active guests to skip.
+- Prevents single admin or small clique from disrupting flow
+- Open questions:
+  - Define "active guests" (connected clients? recent voters? last N minutes?)
+  - Skip votes reset per song
+  - Admin override option for emergencies
 
 ### Inline UI in Worker
 **Why**: removes a separate hosting layer, keeps deployment single‑step,

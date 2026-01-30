@@ -4,12 +4,13 @@ A simple, real-time karaoke queue manager built as a Cloudflare Worker with Dura
 
 ## Features
 
-- **Join the queue** — Enter your name to get in line
-- **One song rule** — You can only rejoin after you've sung (prevents queue hogging)
+- **Two modes** — Karaoke (name-based, epoch fairness) or Jukebox (session-based, personal stacks)
 - **Real-time updates** — WebSockets with polling fallback for reliability
 - **Mobile-friendly** — Designed for phones at a karaoke party
 - **Persistent state** — Queue survives page refreshes and reconnections
-- **Admin controls** — Skip, remove, reorder, and add songs (PIN-protected per room)
+- **Admin controls** — Skip, remove, reorder, add songs, switch modes (PIN-protected)
+- **Player controls** — Search and add songs from the TV screen
+- **Google OAuth** — Cross-device identity for jukebox mode
 
 ## Vision
 Karaoke should feel effortless: guests add songs from their phones, the crowd votes, and the venue screen plays automatically. The system stays out of the way, keeps the line fair, and never makes the host babysit the queue.
@@ -57,13 +58,15 @@ For UX improvements and prioritization, see `docs/UX.md`.
 - Enforce validation/sanitization on WebSocket joins.
 - Require server-issued verification token for claimed names.
 - Server-side guard: no voting on your own entry.
-- Fix Admin popular-songs payload mismatch.
+- ~~Fix Admin popular-songs payload mismatch.~~ ✅
 
 **Horizon 2: Multi-Room Maturity**
 - Extension room selector + stored room preference.
 - Persist admin sessions in storage with clear expiry UX.
 - Room-level settings (queue size, max song length, voting on/off).
-- Personal song stacks (auto‑queue next song after your turn).
+- ~~Personal song stacks (auto‑queue next song after your turn).~~ ✅ Jukebox mode
+- ~~Google OAuth + anonymous sessions.~~ ✅
+- Skip consensus voting (2/3 majority to skip)
 
 **Horizon 3: Product Expansion**
 - Spotify integration (search + playback in player view).

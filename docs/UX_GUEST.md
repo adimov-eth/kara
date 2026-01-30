@@ -28,14 +28,16 @@ Goal: minimize friction to add a song, make wait time feel fair, and keep trust 
 ### S4) Finished
 - Show recap (votes) + prompt to claim name if unclaimed
 
-### S5) Skip Vote (Consensus)
+### S5) Skip Vote (Consensus) `[PROPOSED]`
 - If the room enables skip voting, guests can vote to skip the current song.
 - Skip triggers only when **>= 2/3 of active guests** vote to skip.
+- Currently: admin-only skip or singer can skip their own song.
 
-### S6) Song Stack (Planned)
-- Guests can curate a list of future songs (“stack”).
-- After their song ends, the next item is auto‑queued into the **next round**.
-- The user can reorder or remove items from their stack.
+### S6) Song Stack `[IMPLEMENTED]`
+- In jukebox mode, guests curate a list of future songs ("stack").
+- One song per user in main queue; extras wait in personal stack.
+- When your song plays, next stack item auto-promotes to queue.
+- Reorder or remove items via "My Stack" UI.
 
 ## Highest Impact Improvements
 ### G1) Quick‑Join Name Chip
@@ -93,12 +95,12 @@ Goal: minimize friction to add a song, make wait time feel fair, and keep trust 
 - WS reconnect count per session
 
 ## Implementation Checklist
-1) Quick‑join chip UI + edit flow  
-2) Connection pill in header  
-3) ETA calculation (simple average for now)  
-4) Persist and display last known state  
-5) Vote feedback + undo  
-6) Song stack UI + auto‑queue logic
+1) Quick‑join chip UI + edit flow
+2) Connection pill in header ✅ (player view)
+3) ETA calculation (simple average for now)
+4) Persist and display last known state
+5) Vote feedback + undo
+6) Song stack UI + auto‑queue logic ✅ (jukebox mode)
 
 ## Done‑Definition (Guest)
 - New users can add a song in <30 seconds  
