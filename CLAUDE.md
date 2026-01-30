@@ -68,24 +68,27 @@ interface Entry {
 Rooms can operate in two modes, switchable by admin:
 
 ### Karaoke Mode (default)
-Epoch-based fairness: people who wait get priority over repeat singers.
+Name-based identity with epoch fairness. Users enter a name and add songs.
 
-1. New entries get `epoch = currentEpoch`
-2. When song finishes: `currentEpoch++`
-3. Sort: epoch ASC → votes DESC → joinedAt ASC
+| Aspect | Behavior |
+|--------|----------|
+| Identity | Stage name (can be PIN-protected) |
+| Queue | Unlimited entries per name |
+| Sorting | epoch ASC → votes DESC → joinedAt ASC |
+| Fairness | People who wait get priority (epoch increments after each song) |
 
 ### Jukebox Mode
-Vote-based with personal stacks: democratic song selection with fair rotation.
+Session-based identity with personal stacks. Users sign in (Google or anonymous).
 
-1. Each user has one song in the main queue at a time
-2. Additional songs go to personal stack (waiting list)
-3. When your song plays, next song from stack promotes to queue
-4. Sort: votes DESC → joinedAt ASC (no epochs)
+| Aspect | Behavior |
+|--------|----------|
+| Identity | Session (Google OAuth or anonymous) |
+| Queue | 1 song per user in main queue |
+| Stack | Additional songs wait in personal stack |
+| Sorting | votes DESC → joinedAt ASC (no epochs) |
+| Auto-promote | When your song plays, next from stack enters queue |
 
-**Stack behavior**:
-- Add song → if no song in queue, goes to queue; otherwise to personal stack
-- Song finishes → user's next stacked song auto-promotes to queue
-- Reorder stack → drag songs in "My Stack" UI
+**Both modes**: Users can always add more songs, even while their current song is queued or playing.
 
 ## Routes
 
@@ -252,6 +255,8 @@ Located at `packages/extension/`. Provides venue display control.
 - ✅ Google OAuth + anonymous session auth
 - ✅ Jukebox mode with personal stacks
 - ✅ Admin mode switching (jukebox/karaoke)
+- ✅ Player view controls (search, add, admin skip/reorder/remove)
+- ✅ Dynamic OAuth callback URL (works on all domains)
 
 ### Pending
 - ❌ Spotify integration
