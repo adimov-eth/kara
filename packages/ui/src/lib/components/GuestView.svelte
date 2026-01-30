@@ -94,10 +94,10 @@
   const roomMode = $derived(roomConfig?.mode ?? 'karaoke');
   const canJoin = $derived(
     validatedUrl && (
-      // Jukebox mode: just need to be logged in (can always add to stack)
+      // Jukebox mode: just need to be logged in
       (roomMode === 'jukebox' && isLoggedIn) ||
-      // Karaoke mode: need name and not already in queue or playing
-      (roomMode === 'karaoke' && myName.trim().length > 0 && !isInQueue && !isMyTurn)
+      // Karaoke mode: need name
+      (roomMode === 'karaoke' && myName.trim().length > 0)
     ),
   );
 
@@ -591,7 +591,7 @@
     </div>
   {/if}
 
-  {#if myEntry && roomMode === 'karaoke'}
+  {#if myEntry}
     <div class="my-song-card">
       <div class="my-song-header">
         <span class="my-song-label">Your song</span>
@@ -604,7 +604,9 @@
         Change Song
       </button>
     </div>
-  {:else if isMyTurn && roomMode === 'karaoke'}
+  {/if}
+
+  {#if isMyTurn}
     <div class="my-turn-card">
       <div class="my-turn-label">You're up!</div>
       <div class="my-turn-song">{room.nowPlaying?.title}</div>
@@ -614,61 +616,57 @@
     </div>
   {/if}
 
-  <!-- Jukebox mode: always show add form -->
-  <!-- Karaoke mode: only show when not in queue and not playing -->
-  {#if roomMode === 'jukebox' || (!myEntry && !isMyTurn)}
-    <div class="join-card">
-      {#if roomMode === 'karaoke'}
-        <div class="input-group">
-          <label class="input-label" for="nameInput">Your name</label>
-          <input
-            type="text"
-            id="nameInput"
-            placeholder="Enter your name"
-            maxlength="30"
-            autocomplete="off"
-            value={myName}
-            oninput={handleNameInput}
-          />
+  <div class="join-card">
+    {#if roomMode === 'karaoke'}
+      <div class="input-group">
+        <label class="input-label" for="nameInput">Your name</label>
+        <input
+          type="text"
+          id="nameInput"
+          placeholder="Enter your name"
+          maxlength="30"
+          autocomplete="off"
+          value={myName}
+          oninput={handleNameInput}
+        />
+      </div>
+    {/if}
+
+    <div class="input-group">
+      <span class="input-label">Add a song</span>
+      <Search maxDuration={MAX_DURATION} onSelect={handleSongSelect} />
+
+      {#if !selectedSong}
+        <PopularSongs onSelect={handlePopularSelect} />
+      {/if}
+
+      {#if selectedSong}
+        <div class="selected-song">
+          <div class="selected-song-title">{selectedSong.title}</div>
+          <div class="selected-song-meta">
+            {selectedSong.channel} · {selectedSong.duration}
+          </div>
         </div>
       {/if}
 
-      <div class="input-group">
-        <span class="input-label">{roomMode === 'jukebox' ? 'Add another song' : 'Search for a song'}</span>
-        <Search maxDuration={MAX_DURATION} onSelect={handleSongSelect} />
-
-        {#if !selectedSong}
-          <PopularSongs onSelect={handlePopularSelect} />
-        {/if}
-
-        {#if selectedSong}
-          <div class="selected-song">
-            <div class="selected-song-title">{selectedSong.title}</div>
-            <div class="selected-song-meta">
-              {selectedSong.channel} · {selectedSong.duration}
-            </div>
-          </div>
-        {/if}
-
-        {#if validationStatus !== "idle"}
-          <div class="validation-status {validationStatus}">
-            {#if validationStatus === "checking"}
-              <div class="validation-spinner"></div>
-            {/if}
-            {validationMsg}
-          </div>
-        {/if}
-      </div>
-
-      <button class="btn" onclick={handleJoin} disabled={!canJoin || isJoining}>
-        {roomMode === 'jukebox' ? 'Add to Stack' : 'Add to Queue'}
-      </button>
-
-      {#if joinError}
-        <div class="error-msg">{joinError}</div>
+      {#if validationStatus !== "idle"}
+        <div class="validation-status {validationStatus}">
+          {#if validationStatus === "checking"}
+            <div class="validation-spinner"></div>
+          {/if}
+          {validationMsg}
+        </div>
       {/if}
     </div>
-  {/if}
+
+    <button class="btn" onclick={handleJoin} disabled={!canJoin || isJoining}>
+      {roomMode === 'jukebox' ? 'Add to Stack' : 'Add to Queue'}
+    </button>
+
+    {#if joinError}
+      <div class="error-msg">{joinError}</div>
+    {/if}
+  </div>
 
   <Queue
     entries={room.queue}
