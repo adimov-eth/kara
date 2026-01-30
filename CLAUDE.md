@@ -4,7 +4,7 @@
 
 Real-time karaoke queue manager. YouTube now, Spotify later. Chrome extension for venue display control.
 
-**Live**: https://karaoke-queue.boris-47d.workers.dev
+**Live**: https://bkk.lol (alias: https://karaoke-queue.boris-47d.workers.dev)
 
 ## Commands
 
@@ -75,9 +75,10 @@ Prevents queue-hogging: people who wait get priority over repeat singers.
 
 | Path | Purpose |
 |------|---------|
-| `/` | Guest view: add songs, vote, see queue |
-| `/player` | Big screen: auto-plays queue, shows "up next" |
-| `/shikashika` | Admin: skip, add, reorder, remove |
+| `/` | Landing page: enter room code |
+| `/{room}` | Guest view: add songs, vote, see queue |
+| `/{room}/player` | Big screen: auto-plays queue, shows "up next" |
+| `/{room}/admin` | Admin: skip, add, reorder, remove, mode toggle |
 
 ## Identity System
 
@@ -88,6 +89,8 @@ Optional PIN protection for stage names:
 3. **Claimed names** — Require PIN verification to use
 
 ## API
+
+All endpoints require `?room={roomId}` query parameter.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -103,10 +106,15 @@ Optional PIN protection for stage names:
 | POST | `/api/next` | Advance queue |
 | POST | `/api/reorder` | Admin reorder |
 | POST | `/api/add` | Admin add to front |
+| GET | `/api/room/check` | Check if room exists |
+| POST | `/api/room/create` | Create new room with admin PIN |
+| GET | `/api/room/config` | Get room configuration |
+| POST | `/api/room/config` | Update room config (admin, mode switch) |
+| POST | `/api/admin/verify` | Verify admin PIN, get session token |
 
 ## WebSocket Protocol
 
-Connect: `wss://karaoke-queue.boris-47d.workers.dev/?upgrade=websocket`
+Connect: `wss://bkk.lol/{room}?upgrade=websocket`
 
 **Client → Server:**
 - `{ kind: 'subscribe', clientType: 'user' | 'player' | 'admin' | 'extension' }`
@@ -141,9 +149,10 @@ packages/ui/
 │   │       ├── PinModal.svelte
 │   │       └── HelpButton.svelte
 │   └── routes/
-│       ├── +page.svelte            # Guest view (root)
-│       ├── player/+page.svelte     # TV display
-│       └── shikashika/+page.svelte # Admin controls
+│       ├── +page.svelte            # Landing page (room code entry)
+│       ├── [room]/+page.svelte     # Guest view
+│       ├── [room]/player/+page.svelte  # TV display
+│       └── [room]/admin/+page.svelte   # Admin controls
 └── scripts/
     └── inline.js               # Bundles Svelte output into worker
 ```
@@ -190,12 +199,16 @@ Located at `packages/extension/`. Provides venue display control.
 - ✅ Build pipeline: Svelte → esbuild inline → worker serves HTML
 - ✅ Chrome extension with auto-play and end detection
 - ✅ Help button with usage guide
+- ✅ Performance outcome union (`completed` | `skipped` | `errored`)
+- ✅ Result types for API responses
+- ✅ Branded types (`EntryId`, `VideoId`, etc.)
+- ✅ Room-based routing (`/{room}`, `/{room}/admin`, etc.)
+- ✅ Google OAuth + anonymous session auth
+- ✅ Jukebox mode with personal stacks
+- ✅ Admin mode switching (jukebox/karaoke)
 
-### Pending (from PRD)
-- ❌ Delete `Song` aggregates (derive from Performance)
-- ❌ Performance outcome union (`completed` | `skipped` | `errored`)
-- ❌ Result types for API responses
-- ❌ Branded types (`EntryId`, `VideoId`, etc.)
+### Pending
+- ❌ Spotify integration
 
 ## Key Files
 
