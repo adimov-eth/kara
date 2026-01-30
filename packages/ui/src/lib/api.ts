@@ -15,8 +15,6 @@ import type {
   RoomConfig,
   FeedbackRequest,
   FeedbackResult,
-  ClarifyRequest,
-  ClarifyResult,
 } from '@karaoke/types';
 
 const API = '/api';
@@ -37,7 +35,6 @@ export type {
   AdminVerifyResult,
   RoomConfig,
   FeedbackResult,
-  ClarifyResult,
 };
 
 // =============================================================================
@@ -344,10 +341,4 @@ export async function submitFeedback(
     roomId: getRoomId() !== 'default' ? getRoomId() : undefined,
   };
   return api('/feedback', { method: 'POST', body: fullReq, skipRoom: true });
-}
-
-export async function clarifyFeedback(
-  req: ClarifyRequest
-): Promise<ClarifyResult> {
-  return api('/feedback/clarify', { method: 'POST', body: req, skipRoom: true });
 }

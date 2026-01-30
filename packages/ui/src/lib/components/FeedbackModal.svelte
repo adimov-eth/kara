@@ -1,6 +1,6 @@
 <script lang="ts">
-  import type { FeedbackCategory, ClarifyResult } from '@karaoke/types';
-  import { submitFeedback, clarifyFeedback } from '$lib/api';
+  import type { FeedbackCategory } from '@karaoke/types';
+  import { submitFeedback } from '$lib/api';
   import { toastStore } from '$lib/stores/toast.svelte';
   import { vibrateSuccess, vibrateError } from '$lib/haptics';
 
@@ -11,16 +11,9 @@
 
   let { isOpen, onClose }: Props = $props();
 
-  // Form state
   let feedback = $state('');
   let title = $state('');
   let category = $state<FeedbackCategory>('suggestion');
-
-  // AI clarification state
-  let aiResult = $state<ClarifyResult | null>(null);
-  let isClarifying = $state(false);
-
-  // Submit state
   let isSubmitting = $state(false);
   let error = $state('');
 
@@ -35,33 +28,12 @@
     feedback = '';
     title = '';
     category = 'suggestion';
-    aiResult = null;
     error = '';
   }
 
   function handleClose() {
     resetForm();
     onClose();
-  }
-
-  async function handleClarify() {
-    if (!feedback.trim()) return;
-
-    isClarifying = true;
-    error = '';
-
-    const result = await clarifyFeedback({ feedback, category });
-
-    isClarifying = false;
-
-    if (result.kind === 'clarified') {
-      aiResult = result;
-      if (result.suggestedTitle && !title) {
-        title = result.suggestedTitle;
-      }
-    } else {
-      error = result.message;
-    }
   }
 
   async function handleSubmit() {
@@ -74,7 +46,6 @@
       feedback: feedback.trim(),
       title: title.trim() || undefined,
       category,
-      aiSummary: aiResult?.kind === 'clarified' ? aiResult.summary : undefined,
     });
 
     isSubmitting = false;
@@ -131,51 +102,21 @@
       <input
         type="text"
         bind:value={title}
-        placeholder={aiResult?.kind === 'clarified' && aiResult.suggestedTitle
-          ? aiResult.suggestedTitle
-          : 'Brief title (optional)'}
+        placeholder="Brief title (optional)"
         maxlength="100"
       />
-
-      {#if aiResult?.kind === 'clarified'}
-        <div class="ai-result">
-          <div class="ai-summary">
-            <strong>I understood:</strong> {aiResult.summary}
-          </div>
-          {#if aiResult.questions.length > 0}
-            <div class="ai-questions">
-              <strong>Could you clarify:</strong>
-              <ul>
-                {#each aiResult.questions as q}
-                  <li>{q}</li>
-                {/each}
-              </ul>
-            </div>
-          {/if}
-        </div>
-      {/if}
 
       {#if error}
         <div class="error-msg">{error}</div>
       {/if}
 
-      <div class="actions">
-        <button
-          class="btn-secondary"
-          onclick={handleClarify}
-          disabled={!feedback.trim() || isClarifying}
-        >
-          {isClarifying ? 'Thinking...' : 'Help me explain'}
-        </button>
-
-        <button
-          class="btn"
-          onclick={handleSubmit}
-          disabled={!feedback.trim() || isSubmitting}
-        >
-          {isSubmitting ? 'Sending...' : 'Send Feedback'}
-        </button>
-      </div>
+      <button
+        class="btn"
+        onclick={handleSubmit}
+        disabled={!feedback.trim() || isSubmitting}
+      >
+        {isSubmitting ? 'Sending...' : 'Send Feedback'}
+      </button>
     </div>
   </div>
 {/if}
@@ -321,30 +262,6 @@
     color: var(--text-muted);
   }
 
-  .ai-result {
-    background: rgba(0, 212, 255, 0.1);
-    border: 1px solid rgba(0, 212, 255, 0.2);
-    border-radius: 12px;
-    padding: 16px;
-    margin-bottom: 16px;
-    font-size: 0.9rem;
-  }
-
-  .ai-summary {
-    margin-bottom: 12px;
-    line-height: 1.5;
-  }
-
-  .ai-questions ul {
-    margin: 8px 0 0 20px;
-    padding: 0;
-  }
-
-  .ai-questions li {
-    margin-bottom: 4px;
-    color: var(--text-muted);
-  }
-
   .error-msg {
     color: var(--warning);
     font-size: 0.9rem;
@@ -352,14 +269,8 @@
     margin-bottom: 12px;
   }
 
-  .actions {
-    display: flex;
-    gap: 12px;
-  }
-
-  .btn,
-  .btn-secondary {
-    flex: 1;
+  .btn {
+    width: 100%;
     padding: 14px 20px;
     border-radius: 14px;
     font-size: 1rem;
@@ -367,9 +278,6 @@
     font-family: inherit;
     cursor: pointer;
     transition: all 0.2s ease;
-  }
-
-  .btn {
     background: linear-gradient(135deg, var(--accent) 0%, #ff8fab 100%);
     border: none;
     color: white;
@@ -381,22 +289,6 @@
   }
 
   .btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .btn-secondary {
-    background: transparent;
-    border: 2px solid rgba(255, 255, 255, 0.2);
-    color: var(--text-muted);
-  }
-
-  .btn-secondary:hover:not(:disabled) {
-    border-color: var(--cyan);
-    color: var(--cyan);
-  }
-
-  .btn-secondary:disabled {
     opacity: 0.5;
     cursor: not-allowed;
   }

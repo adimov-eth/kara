@@ -1,5 +1,5 @@
 import type { Env } from './env.js'
-import type { FeedbackRequest, ClarifyRequest } from '@karaoke/types'
+import type { FeedbackRequest } from '@karaoke/types'
 import { GUEST_HTML, PLAYER_HTML, ADMIN_HTML, LANDING_HTML } from './views/generated/index.js'
 
 // Re-export RoomDO for Cloudflare to find it
@@ -126,10 +126,6 @@ function formatIssueBody(req: FeedbackRequest): string {
     '',
   ]
 
-  if (req.aiSummary) {
-    lines.push('### AI Summary', '', req.aiSummary, '')
-  }
-
   lines.push(
     '---',
     '',
@@ -222,79 +218,6 @@ async function handleFeedback(request: Request, env: Env): Promise<Response> {
   }
 }
 
-async function handleClarify(request: Request, env: Env): Promise<Response> {
-  try {
-    const body = await request.json() as ClarifyRequest
-
-    if (!body.feedback?.trim()) {
-      return addCorsHeaders(Response.json(
-        { kind: 'error', message: 'Feedback required' },
-        { status: 400 }
-      ))
-    }
-
-    const prompt = `You are helping a user submit feedback for a karaoke queue app. Analyze their feedback and help them articulate it better.
-
-Category: ${body.category}
-Feedback: ${body.feedback}
-
-Respond with JSON only (no markdown):
-{
-  "summary": "1-2 sentence summary of what you understood",
-  "suggestedTitle": "concise title under 50 chars",
-  "questions": ["clarifying question 1", "clarifying question 2"] // empty array if feedback is clear
-}
-
-Be concise and helpful. The user is not technical.`
-
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-3-haiku-20240307',
-        max_tokens: 300,
-        messages: [{ role: 'user', content: prompt }],
-      }),
-    })
-
-    if (!response.ok) {
-      console.error('Anthropic API error:', await response.text())
-      return addCorsHeaders(Response.json(
-        { kind: 'error', message: 'AI service unavailable' },
-        { status: 502 }
-      ))
-    }
-
-    const result = await response.json() as {
-      content: Array<{ type: string; text: string }>
-    }
-
-    const text = result.content[0]?.text || '{}'
-    const parsed = JSON.parse(text) as {
-      summary: string
-      suggestedTitle: string
-      questions: string[]
-    }
-
-    return addCorsHeaders(Response.json({
-      kind: 'clarified',
-      summary: parsed.summary || '',
-      suggestedTitle: parsed.suggestedTitle || '',
-      questions: parsed.questions || [],
-    }))
-  } catch (err) {
-    console.error('Clarify error:', err)
-    return addCorsHeaders(Response.json(
-      { kind: 'error', message: 'Failed to process' },
-      { status: 500 }
-    ))
-  }
-}
-
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url)
@@ -344,12 +267,9 @@ export default {
       return addCorsHeaders(Response.json({ rooms }))
     }
 
-    // Feedback endpoints (global, not room-scoped)
+    // Feedback endpoint (global, not room-scoped)
     if (path === '/api/feedback' && request.method === 'POST') {
       return handleFeedback(request, env)
-    }
-    if (path === '/api/feedback/clarify' && request.method === 'POST') {
-      return handleClarify(request, env)
     }
 
     // API routes - proxy to DO

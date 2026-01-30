@@ -356,20 +356,10 @@ export interface FeedbackRequest {
   page: string               // current URL path
   userAgent: string
   roomId?: string            // if in a room
-  aiSummary?: string         // if user used "Help me explain"
 }
 
 export type FeedbackResult =
   | { kind: 'created'; issueUrl: string; issueNumber: number }
   | { kind: 'rateLimited' }
   | { kind: 'validationError'; message: string }
-  | { kind: 'error'; message: string }
-
-export interface ClarifyRequest {
-  feedback: string
-  category: FeedbackCategory
-}
-
-export type ClarifyResult =
-  | { kind: 'clarified'; summary: string; suggestedTitle: string; questions: string[] }
   | { kind: 'error'; message: string }
