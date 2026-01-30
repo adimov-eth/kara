@@ -1,7 +1,7 @@
-import type { Entry, QueueState, VoteRecord } from '@karaoke/types'
+import type { Entry, QueueState, VoteRecord, StackedSong, RoomMode } from '@karaoke/types'
 
 /**
- * Sort queue by epoch ASC, votes DESC, joinedAt ASC
+ * Sort queue by epoch ASC, votes DESC, joinedAt ASC (karaoke mode)
  * Pure function - returns a new sorted array
  */
 export function sortQueue<T extends { epoch: number; votes: number; joinedAt: number }>(
@@ -12,6 +12,30 @@ export function sortQueue<T extends { epoch: number; votes: number; joinedAt: nu
     if (a.votes !== b.votes) return b.votes - a.votes
     return a.joinedAt - b.joinedAt
   })
+}
+
+/**
+ * Sort queue by votes DESC, joinedAt ASC (jukebox mode)
+ * Ignores epochs - votes are the only priority factor
+ * Pure function - returns a new sorted array
+ */
+export function sortByVotes<T extends { votes: number; joinedAt: number }>(
+  queue: readonly T[]
+): T[] {
+  return [...queue].sort((a, b) => {
+    if (a.votes !== b.votes) return b.votes - a.votes
+    return a.joinedAt - b.joinedAt
+  })
+}
+
+/**
+ * Sort queue based on room mode
+ */
+export function sortQueueByMode<T extends { epoch: number; votes: number; joinedAt: number }>(
+  queue: readonly T[],
+  mode: RoomMode
+): T[] {
+  return mode === 'jukebox' ? sortByVotes(queue) : sortQueue(queue)
 }
 
 /**
@@ -51,7 +75,7 @@ export function createEntry(params: {
 }
 
 /**
- * Check if a user can join the queue
+ * Check if a user can join the queue (karaoke mode - name-based)
  * Returns error message or null if allowed
  */
 export function canJoinQueue(
@@ -74,6 +98,85 @@ export function canJoinQueue(
   }
 
   return null
+}
+
+/**
+ * Check if a user can add directly to the general queue (jukebox mode - user ID based)
+ * In jukebox mode, each user can only have ONE song in the general queue at a time
+ * Returns true if user can add to queue, false if they must add to stack
+ */
+export function canAddToGeneralQueue(
+  state: QueueState,
+  userId: string
+): boolean {
+  // Check if user already has an entry in general queue
+  const hasEntryInQueue = state.queue.some((e) => e.userId === userId)
+  if (hasEntryInQueue) return false
+
+  // Check if currently playing
+  if (state.nowPlaying?.userId === userId) return false
+
+  return true
+}
+
+/**
+ * Check if user can add to their personal stack
+ */
+export function canAddToStack(
+  currentStackSize: number,
+  maxStackSize: number
+): boolean {
+  return currentStackSize < maxStackSize
+}
+
+/**
+ * Create a stacked song entry
+ */
+export function createStackedSong(params: {
+  id: string
+  videoId: string
+  title: string
+  source: 'youtube' | 'spotify'
+  timestamp: number
+}): StackedSong {
+  return {
+    id: params.id,
+    videoId: params.videoId,
+    title: params.title.substring(0, 100),
+    source: params.source,
+    addedAt: params.timestamp,
+  }
+}
+
+/**
+ * Promote the first song from a user's stack to an Entry
+ * Returns the new entry and the updated stack
+ */
+export function promoteFromStack(
+  stack: readonly StackedSong[],
+  userId: string,
+  displayName: string,
+  entryId: string,
+  timestamp: number
+): { entry: Entry; remainingStack: StackedSong[] } | null {
+  if (stack.length === 0) return null
+
+  const [first, ...rest] = stack
+  const song = first!
+
+  const entry: Entry = {
+    id: entryId,
+    name: displayName,
+    videoId: song.videoId,
+    title: song.title,
+    source: song.source,
+    votes: 0,
+    epoch: 0, // Not used in jukebox mode
+    joinedAt: timestamp,
+    userId,
+  }
+
+  return { entry, remainingStack: rest }
 }
 
 /**

@@ -12,9 +12,22 @@ import type {
   CreateRoomResult,
   CheckRoomResult,
   AdminVerifyResult,
+  SetConfigResult,
   RoomConfig,
+  RoomMode,
   FeedbackRequest,
   FeedbackResult,
+  GetSessionResult,
+  AnonymousSessionResult,
+  LogoutResult,
+  GetMyStackResult,
+  AddToStackResult,
+  RemoveFromStackResult,
+  ReorderStackResult,
+  UserSession,
+  User,
+  StackedSong,
+  Entry,
 } from '@karaoke/types';
 
 const API = '/api';
@@ -33,8 +46,21 @@ export type {
   CreateRoomResult,
   CheckRoomResult,
   AdminVerifyResult,
+  SetConfigResult,
   RoomConfig,
+  RoomMode,
   FeedbackResult,
+  GetSessionResult,
+  AnonymousSessionResult,
+  LogoutResult,
+  GetMyStackResult,
+  AddToStackResult,
+  RemoveFromStackResult,
+  ReorderStackResult,
+  UserSession,
+  User,
+  StackedSong,
+  Entry,
 };
 
 // =============================================================================
@@ -327,6 +353,13 @@ export const adminReorder = (entryId: string, newPosition: number): Promise<Reor
     body: { entryId, newPosition },
   });
 
+export const setRoomMode = (mode: RoomMode): Promise<SetConfigResult> =>
+  api('/room/config', {
+    method: 'POST',
+    headers: getAdminAuthHeaders(),
+    body: { mode },
+  });
+
 // =============================================================================
 // Feedback
 // =============================================================================
@@ -341,4 +374,140 @@ export async function submitFeedback(
     roomId: getRoomId() !== 'default' ? getRoomId() : undefined,
   };
   return api('/feedback', { method: 'POST', body: fullReq, skipRoom: true });
+}
+
+// =============================================================================
+// Authentication (Google OAuth + Anonymous)
+// =============================================================================
+
+/**
+ * Redirect to Google OAuth login
+ * @param returnUrl Where to redirect after login (defaults to current path)
+ */
+export function loginWithGoogle(returnUrl?: string): void {
+  const roomId = getRoomId();
+  const returnPath = returnUrl ?? window.location.pathname;
+  const params = new URLSearchParams({
+    room: roomId,
+    return: returnPath,
+  });
+  window.location.href = `/auth/google?${params.toString()}`;
+}
+
+/**
+ * Get current session from cookie
+ */
+export async function getSession(): Promise<GetSessionResult> {
+  try {
+    const res = await fetch('/auth/session', { credentials: 'include' });
+    return await res.json() as GetSessionResult;
+  } catch {
+    return { kind: 'error', message: 'Network error' };
+  }
+}
+
+/**
+ * Create an anonymous session
+ */
+export async function createAnonymousSession(displayName?: string): Promise<AnonymousSessionResult> {
+  const roomId = getRoomId();
+  try {
+    const res = await fetch('/auth/anonymous', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ roomId, displayName }),
+    });
+    return await res.json() as AnonymousSessionResult;
+  } catch {
+    return { kind: 'error', message: 'Network error' };
+  }
+}
+
+/**
+ * Logout (clear session)
+ */
+export async function logout(): Promise<LogoutResult> {
+  try {
+    const res = await fetch('/auth/logout', {
+      method: 'POST',
+      credentials: 'include',
+    });
+    return await res.json() as LogoutResult;
+  } catch {
+    return { kind: 'error', message: 'Network error' };
+  }
+}
+
+// =============================================================================
+// Stack Management (Jukebox Mode)
+// =============================================================================
+
+/**
+ * Get my personal stack and current queue entry
+ */
+export async function getMyStack(): Promise<GetMyStackResult> {
+  try {
+    const roomId = getRoomId();
+    const res = await fetch(`${API}/stack?room=${encodeURIComponent(roomId)}`, {
+      credentials: 'include',
+    });
+    return await res.json() as GetMyStackResult;
+  } catch {
+    return { kind: 'error', message: 'Network error' };
+  }
+}
+
+/**
+ * Add a song (to queue if slot available, otherwise to personal stack)
+ */
+export async function addSong(videoId: string, title: string): Promise<AddToStackResult> {
+  try {
+    const roomId = getRoomId();
+    const res = await fetch(`${API}/stack/add?room=${encodeURIComponent(roomId)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ videoId, title }),
+    });
+    return await res.json() as AddToStackResult;
+  } catch {
+    return { kind: 'error', message: 'Network error' };
+  }
+}
+
+/**
+ * Remove a song from my personal stack
+ */
+export async function removeFromStack(songId: string): Promise<RemoveFromStackResult> {
+  try {
+    const roomId = getRoomId();
+    const res = await fetch(`${API}/stack/remove?room=${encodeURIComponent(roomId)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ songId }),
+    });
+    return await res.json() as RemoveFromStackResult;
+  } catch {
+    return { kind: 'error', message: 'Network error' };
+  }
+}
+
+/**
+ * Reorder my personal stack
+ */
+export async function reorderStack(songIds: string[]): Promise<ReorderStackResult> {
+  try {
+    const roomId = getRoomId();
+    const res = await fetch(`${API}/stack/reorder?room=${encodeURIComponent(roomId)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ songIds }),
+    });
+    return await res.json() as ReorderStackResult;
+  } catch {
+    return { kind: 'error', message: 'Network error' };
+  }
 }

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import type { QueueState, SearchResult } from '@karaoke/types';
+  import type { QueueState, SearchResult, RoomConfig, RoomMode } from '@karaoke/types';
   import {
     createWebSocket,
     getState,
@@ -14,6 +14,8 @@
     setAdminToken,
     clearAdminToken,
     getRoomId,
+    getRoomConfig,
+    setRoomMode,
   } from '$lib';
   import { extractVideoId } from '@karaoke/domain';
   import { toastStore } from '$lib/stores/toast.svelte';
@@ -28,6 +30,8 @@
   // Room state
   let roomId = $state('');
   let room = $state<QueueState>({ queue: [], nowPlaying: null, currentEpoch: 0 });
+  let roomConfig = $state<RoomConfig | null>(null);
+  let isChangingMode = $state(false);
 
   // Add form
   let addName = $state('');
@@ -93,7 +97,7 @@
     authChecked = true;
   }
 
-  function initializeAdmin() {
+  async function initializeAdmin() {
     ws.onState((newState) => {
       room = newState;
       if (pollInterval) {
@@ -109,6 +113,9 @@
       const state = await getState();
       if (state) room = state;
     }, 2000);
+
+    // Fetch room config for mode display
+    roomConfig = await getRoomConfig();
   }
 
   async function handlePinSubmit() {
@@ -265,6 +272,32 @@
     }
   }
 
+  async function handleModeToggle() {
+    if (!roomConfig || isChangingMode) return;
+
+    const newMode: RoomMode = roomConfig.mode === 'jukebox' ? 'karaoke' : 'jukebox';
+    const confirmMsg = newMode === 'jukebox'
+      ? 'Switch to Jukebox Mode? Queue will re-sort by votes only.'
+      : 'Switch to Karaoke Mode? Queue will re-sort by epochs.';
+
+    if (!confirm(confirmMsg)) return;
+
+    isChangingMode = true;
+    const result = await setRoomMode(newMode);
+    isChangingMode = false;
+
+    if (result.kind === 'updated') {
+      roomConfig = result.config;
+      toastStore.success(`Switched to ${newMode === 'jukebox' ? 'Jukebox' : 'Karaoke'} Mode`);
+    } else if (result.kind === 'unauthorized') {
+      toastStore.error('Session expired - please log in again');
+      handleLogout();
+    } else {
+      const errorMsg = result.kind === 'error' ? result.message : 'Failed to change mode';
+      toastStore.error(errorMsg);
+    }
+  }
+
   function toggleHistory() {
     historyExpanded = !historyExpanded;
   }
@@ -357,6 +390,25 @@
       </p>
       <button class="logout-btn" onclick={handleLogout}>Logout</button>
     </header>
+
+    <!-- Mode Toggle -->
+    {#if roomConfig}
+      <div class="mode-card">
+        <div class="mode-info">
+          <span class="mode-label">Queue Mode</span>
+          <span class="mode-badge" class:jukebox={roomConfig.mode === 'jukebox'} class:karaoke={roomConfig.mode === 'karaoke'}>
+            {roomConfig.mode === 'jukebox' ? '🎵 Jukebox' : '🎤 Karaoke'}
+          </span>
+        </div>
+        <button
+          class="btn btn-mode"
+          onclick={handleModeToggle}
+          disabled={isChangingMode}
+        >
+          {isChangingMode ? 'Switching...' : `Switch to ${roomConfig.mode === 'jukebox' ? 'Karaoke' : 'Jukebox'}`}
+        </button>
+      </div>
+    {/if}
 
     <!-- Now Playing -->
     <div class="now-playing-card">
@@ -610,6 +662,69 @@
   .logout-btn:hover {
     border-color: var(--accent);
     color: var(--accent);
+  }
+
+  .mode-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: var(--bg-card);
+    border-radius: 16px;
+    padding: 16px 20px;
+    margin-bottom: 24px;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+  }
+
+  .mode-info {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .mode-label {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+  }
+
+  .mode-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    border-radius: 20px;
+    font-size: 0.85rem;
+    font-weight: 600;
+  }
+
+  .mode-badge.jukebox {
+    background: rgba(78, 205, 196, 0.2);
+    color: var(--cyan);
+    border: 1px solid rgba(78, 205, 196, 0.3);
+  }
+
+  .mode-badge.karaoke {
+    background: rgba(255, 107, 157, 0.2);
+    color: var(--accent);
+    border: 1px solid rgba(255, 107, 157, 0.3);
+  }
+
+  .btn-mode {
+    padding: 8px 16px;
+    font-size: 0.85rem;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    color: var(--text);
+    width: auto;
+  }
+
+  .btn-mode:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.1);
+    border-color: rgba(255, 255, 255, 0.3);
+  }
+
+  .btn-mode:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .login-card {

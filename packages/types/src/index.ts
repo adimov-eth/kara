@@ -11,6 +11,8 @@ export type RoomId = Brand<string, 'RoomId'>
 export type AdminToken = Brand<string, 'AdminToken'>
 export type Timestamp = Brand<number, 'Timestamp'>
 export type Epoch = Brand<number, 'Epoch'>
+export type UserId = Brand<string, 'UserId'>
+export type SessionId = Brand<string, 'SessionId'>
 
 // Type constructors (cast at boundaries, use branded types internally)
 export const EntryId = (s: string): EntryId => s as EntryId
@@ -20,6 +22,8 @@ export const RoomId = (s: string): RoomId => s as RoomId
 export const AdminToken = (s: string): AdminToken => s as AdminToken
 export const Timestamp = (n: number): Timestamp => n as Timestamp
 export const Epoch = (n: number): Epoch => n as Epoch
+export const UserId = (s: string): UserId => s as UserId
+export const SessionId = (s: string): SessionId => s as SessionId
 
 // =============================================================================
 // Exhaustiveness Helper
@@ -27,6 +31,47 @@ export const Epoch = (n: number): Epoch => n as Epoch
 
 export function assertNever(x: never): never {
   throw new Error(`Unexpected value: ${JSON.stringify(x)}`)
+}
+
+// =============================================================================
+// User & Session (Google OAuth + Anonymous)
+// =============================================================================
+
+export type AuthProvider = 'google' | 'anonymous'
+
+export interface User {
+  id: string                      // Google 'sub' or generated UUID
+  provider: AuthProvider
+  email?: string                  // Only for Google users
+  displayName: string
+  picture?: string                // Google profile picture URL
+  createdAt: number
+}
+
+export interface UserSession {
+  id: string                      // Session token (JWT)
+  userId: string
+  roomId: string
+  displayName: string             // Can override per-room
+  createdAt: number
+  expiresAt: number               // 24 hours from creation
+}
+
+// =============================================================================
+// Personal Stack (Songs Waiting to Enter General Queue)
+// =============================================================================
+
+export interface StackedSong {
+  id: string                      // Unique ID for this stack entry
+  videoId: string                 // YouTube video ID
+  title: string                   // Video title
+  source: 'youtube' | 'spotify'
+  addedAt: number                 // Timestamp when added to stack
+}
+
+export interface UserStack {
+  userId: string
+  songs: StackedSong[]            // Ordered list (first = next to promote)
 }
 
 // =============================================================================
@@ -42,13 +87,18 @@ export interface Entry {
   votes: number
   epoch: number
   joinedAt: number
+  // New fields for jukebox mode (optional for backwards compatibility)
+  userId?: string                 // Who added it (user ID)
+  sessionId?: string              // Which session added it
 }
 
-// Queue state
+// Queue state (extended for jukebox mode)
 export interface QueueState {
   queue: Entry[]
   currentEpoch: number
   nowPlaying: Entry | null
+  // Jukebox mode additions (optional for backwards compatibility)
+  userStacks?: Record<string, StackedSong[]>  // userId → waiting songs
 }
 
 // Playback sync state - enables multi-device synchronized playback
@@ -135,12 +185,18 @@ export interface Identity {
 // Room Configuration & Admin
 // =============================================================================
 
+export type RoomMode = 'jukebox' | 'karaoke'
+
 export interface RoomConfig {
   id: string              // room ID (e.g., "bobs-party")
   displayName: string     // display name (e.g., "Bob's Birthday Karaoke")
   createdAt: number       // timestamp
   maxQueueSize: number    // default: 50
   allowVoting: boolean    // default: true
+  // Jukebox mode additions
+  mode: RoomMode          // 'jukebox' (new default) or 'karaoke' (legacy)
+  requireAuth: boolean    // false allows anonymous users
+  maxStackSize: number    // max songs in personal stack (default: 10)
 }
 
 export interface RoomAdmin {
@@ -273,6 +329,70 @@ export type AdminTokenResult =
   | { kind: 'expired' }
 
 // =============================================================================
+// Auth Result Types
+// =============================================================================
+
+// Get session result
+export type GetSessionResult =
+  | { kind: 'authenticated'; session: UserSession; user: User }
+  | { kind: 'anonymous'; session: UserSession }
+  | { kind: 'unauthenticated' }
+  | { kind: 'error'; message: string }
+
+// Login result (after OAuth callback)
+export type LoginResult =
+  | { kind: 'success'; session: UserSession; user: User }
+  | { kind: 'error'; message: string }
+
+// Anonymous session result
+export type AnonymousSessionResult =
+  | { kind: 'created'; session: UserSession }
+  | { kind: 'error'; message: string }
+
+// Logout result
+export type LogoutResult =
+  | { kind: 'loggedOut' }
+  | { kind: 'error'; message: string }
+
+// =============================================================================
+// Stack Management Result Types
+// =============================================================================
+
+// Add to stack result
+export type AddToStackResult =
+  | { kind: 'added'; song: StackedSong; stackPosition: number }
+  | { kind: 'addedToQueue'; entry: Entry; queuePosition: number }
+  | { kind: 'stackFull'; maxSize: number }
+  | { kind: 'unauthenticated' }
+  | { kind: 'error'; message: string }
+
+// Remove from stack result
+export type RemoveFromStackResult =
+  | { kind: 'removed'; songId: string }
+  | { kind: 'notFound' }
+  | { kind: 'unauthenticated' }
+  | { kind: 'error'; message: string }
+
+// Reorder stack result
+export type ReorderStackResult =
+  | { kind: 'reordered'; stack: StackedSong[] }
+  | { kind: 'unauthenticated' }
+  | { kind: 'error'; message: string }
+
+// Get my stack result
+export type GetMyStackResult =
+  | { kind: 'stack'; songs: StackedSong[]; inQueue: Entry | null }
+  | { kind: 'unauthenticated' }
+  | { kind: 'error'; message: string }
+
+// Set room config result (admin)
+export type SetConfigResult =
+  | { kind: 'updated'; config: RoomConfig }
+  | { kind: 'unauthorized' }
+  | { kind: 'roomNotFound' }
+  | { kind: 'error'; message: string }
+
+// =============================================================================
 // API Request Types
 // =============================================================================
 
@@ -327,10 +447,13 @@ export type ServerMessage =
   | { kind: 'extensionStatus'; connected: boolean }
   | { kind: 'pong'; serverTime?: number; clientTime?: number }
   | { kind: 'sync'; playback: PlaybackState }
+  // Jukebox mode additions
+  | { kind: 'stackUpdated'; userId: string; stack: StackedSong[] }
+  | { kind: 'promotedToQueue'; userId: string; entry: Entry; remainingStack: StackedSong[] }
 
 // Client -> Server messages
 export type ClientMessage =
-  | { kind: 'subscribe'; clientType: ClientType }
+  | { kind: 'subscribe'; clientType: ClientType; sessionToken?: string }
   | { kind: 'join'; name: string; videoId: string; title: string }
   | { kind: 'vote'; entryId: string; direction: 1 | -1 | 0; voterId: string }
   | { kind: 'remove'; entryId: string; userName?: string; isAdmin?: boolean }
@@ -342,6 +465,10 @@ export type ClientMessage =
   | { kind: 'ended'; videoId: string } // Extension reports video end
   | { kind: 'error'; videoId: string; reason: string } // Extension reports video error
   | { kind: 'syncRequest' } // Request current playback state for sync
+  // Jukebox mode additions
+  | { kind: 'addSong'; videoId: string; title: string; sessionToken: string }
+  | { kind: 'removeFromStack'; songId: string; sessionToken: string }
+  | { kind: 'reorderStack'; songIds: string[]; sessionToken: string }
 
 // =============================================================================
 // Feedback Types

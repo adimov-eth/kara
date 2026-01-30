@@ -1,8 +1,9 @@
-import type { ServerMessage, ClientMessage, ClientType, QueueState } from '@karaoke/types';
+import type { ServerMessage, ClientMessage, ClientType, QueueState, PlaybackState } from '@karaoke/types';
 import { getRoomId } from './api';
 
-type StateHandler = (state: QueueState, extensionConnected?: boolean) => void;
+type StateHandler = (state: QueueState, playback?: PlaybackState, extensionConnected?: boolean) => void;
 type ExtensionStatusHandler = (connected: boolean) => void;
+type SyncHandler = (playback: PlaybackState, serverTimeOffset: number) => void;
 
 // Conditional logging - only in development
 const isDev = typeof window !== 'undefined' &&
@@ -25,6 +26,9 @@ interface WebSocketManager {
   send(message: ClientMessage): void;
   onState(handler: StateHandler): void;
   onExtensionStatus(handler: ExtensionStatusHandler): void;
+  onSync(handler: SyncHandler): void;
+  requestSync(): void;
+  getServerTimeOffset(): number;
   isConnected(): boolean;
 }
 
@@ -41,6 +45,11 @@ export function createWebSocket(): WebSocketManager {
 
   let stateHandler: StateHandler | null = null;
   let extensionStatusHandler: ExtensionStatusHandler | null = null;
+  let syncHandler: SyncHandler | null = null;
+
+  // Server time offset for synchronized playback (serverTime - clientTime)
+  let serverTimeOffset = 0;
+  let pingStartTime = 0;
 
   function getReconnectDelay(): number {
     const delay = Math.min(BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts), MAX_RECONNECT_DELAY);
@@ -49,11 +58,20 @@ export function createWebSocket(): WebSocketManager {
 
   function startHeartbeat() {
     stopHeartbeat();
+    // Send initial ping for clock sync
+    sendPing();
     heartbeatInterval = setInterval(() => {
       if (ws && connected) {
-        ws.send(JSON.stringify({ kind: 'ping' }));
+        sendPing();
       }
     }, 30000);
+  }
+
+  function sendPing() {
+    if (ws && connected) {
+      pingStartTime = Date.now();
+      ws.send(JSON.stringify({ kind: 'ping', clientTime: pingStartTime }));
+    }
   }
 
   function stopHeartbeat() {
@@ -66,13 +84,25 @@ export function createWebSocket(): WebSocketManager {
   function handleMessage(msg: ServerMessage) {
     switch (msg.kind) {
       case 'state':
-        stateHandler?.(msg.state, msg.extensionConnected);
+        stateHandler?.(msg.state, msg.playback, msg.extensionConnected);
         break;
       case 'extensionStatus':
         extensionStatusHandler?.(msg.connected);
         break;
       case 'pong':
-        // Heartbeat response
+        // Calculate server time offset for sync
+        if (msg.serverTime && msg.clientTime) {
+          const now = Date.now();
+          const roundTrip = now - msg.clientTime;
+          // Estimate server time at the moment we receive this message
+          // Server time when it sent = msg.serverTime
+          // Approximate network latency = roundTrip / 2
+          serverTimeOffset = msg.serverTime - msg.clientTime - (roundTrip / 2);
+          log('Clock sync: offset', serverTimeOffset, 'ms, RTT', roundTrip, 'ms');
+        }
+        break;
+      case 'sync':
+        syncHandler?.(msg.playback, serverTimeOffset);
         break;
       case 'error':
         logError('Server error:', msg.message);
@@ -158,6 +188,15 @@ export function createWebSocket(): WebSocketManager {
     },
     onExtensionStatus(handler: ExtensionStatusHandler) {
       extensionStatusHandler = handler;
+    },
+    onSync(handler: SyncHandler) {
+      syncHandler = handler;
+    },
+    requestSync() {
+      send({ kind: 'syncRequest' });
+    },
+    getServerTimeOffset() {
+      return serverTimeOffset;
     },
     isConnected() {
       return connected;

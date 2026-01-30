@@ -12,6 +12,7 @@ import {
   type PerformanceOutcome,
   type Identity,
   type RoomConfig,
+  type RoomMode,
   type RoomAdmin,
   type AdminSession,
   type JoinResult,
@@ -27,12 +28,25 @@ import {
   type CreateRoomResult,
   type CheckRoomResult,
   type AdminVerifyResult,
+  type SetConfigResult,
   type SearchResult,
+  type PlaybackState,
+  type StackedSong,
+  type AddToStackResult,
+  type RemoveFromStackResult,
+  type ReorderStackResult,
+  type GetMyStackResult,
 } from '@karaoke/types'
 import {
   sortQueue,
+  sortByVotes,
+  sortQueueByMode,
   createEntry,
   canJoinQueue,
+  canAddToGeneralQueue,
+  canAddToStack,
+  createStackedSong,
+  promoteFromStack,
   applyVote,
   advanceQueue,
   removeFromQueue,
@@ -58,12 +72,17 @@ import {
   sanitizeName,
   sanitizeTitle,
 } from '@karaoke/domain'
+import { verifySession, getSessionCookie } from './auth.js'
+import type { Env } from './env.js'
 
 const STATE_KEY = 'state'
 const VOTES_KEY = 'votes'
 const PERFORMANCES_KEY = 'performances'
 const CONFIG_KEY = 'config'
 const ADMIN_KEY = 'admin'
+const USER_STACKS_KEY = 'user_stacks'
+
+const DEFAULT_MAX_STACK_SIZE = 10
 
 const ADMIN_SESSION_DURATION_MS = 4 * 60 * 60 * 1000 // 4 hours
 const PIN_RATE_LIMIT_WINDOW_MS = 60 * 1000 // 1 minute
@@ -98,11 +117,14 @@ interface SearchCacheEntry {
 
 export class RoomDO implements DurableObject {
   private state: DurableObjectState
+  private env: Env | null = null
   private queueState: QueueState | null = null
   private votes: VoteRecord | null = null
   private performances: Performance[] | null = null
   private roomConfig: RoomConfig | null = null
   private roomAdmin: RoomAdmin | null = null
+  // User stacks for jukebox mode (persisted)
+  private userStacks: Map<string, StackedSong[]> | null = null
   // Admin sessions (in-memory, not persisted - sessions clear on DO restart)
   private adminSessions: Map<string, AdminSession> = new Map()
   // Rate limiting (in-memory) - keyed by "type:clientId"
@@ -111,9 +133,17 @@ export class RoomDO implements DurableObject {
   private searchCache: Map<string, SearchCacheEntry> = new Map()
   // Track extension WebSockets separately (tags can't be updated after acceptWebSocket)
   private extensionSockets: Set<WebSocket> = new Set()
+  // Playback sync state (in-memory) - tracks when current song started for multi-device sync
+  private playbackState: PlaybackState = {
+    videoId: null,
+    startedAt: 0,
+    position: 0,
+    playing: false,
+  }
 
-  constructor(state: DurableObjectState) {
+  constructor(state: DurableObjectState, env: Env) {
     this.state = state
+    this.env = env
     // WebSocket connections are automatically restored from hibernation
     // via state.getWebSockets() - no explicit initialization needed
   }
@@ -213,6 +243,51 @@ export class RoomDO implements DurableObject {
   private async saveIdentity(name: string, identity: Identity): Promise<void> {
     const key = `identity:${normalizeName(name)}`
     await this.state.storage.put(key, identity)
+  }
+
+  // =========================================================================
+  // User Stack Methods (Jukebox Mode)
+  // =========================================================================
+
+  private async getUserStacks(): Promise<Map<string, StackedSong[]>> {
+    if (!this.userStacks) {
+      const stored = await this.state.storage.get<Record<string, StackedSong[]>>(USER_STACKS_KEY)
+      this.userStacks = new Map(stored ? Object.entries(stored) : [])
+    }
+    return this.userStacks
+  }
+
+  private async saveUserStacks(): Promise<void> {
+    if (this.userStacks) {
+      const obj: Record<string, StackedSong[]> = {}
+      for (const [userId, stack] of this.userStacks) {
+        obj[userId] = stack
+      }
+      await this.state.storage.put(USER_STACKS_KEY, obj)
+    }
+  }
+
+  private async getUserStack(userId: string): Promise<StackedSong[]> {
+    const stacks = await this.getUserStacks()
+    return stacks.get(userId) ?? []
+  }
+
+  private async setUserStack(userId: string, stack: StackedSong[]): Promise<void> {
+    const stacks = await this.getUserStacks()
+    if (stack.length === 0) {
+      stacks.delete(userId)
+    } else {
+      stacks.set(userId, stack)
+    }
+    await this.saveUserStacks()
+  }
+
+  private getRoomMode(): RoomMode {
+    return this.roomConfig?.mode ?? 'jukebox'
+  }
+
+  private getMaxStackSize(): number {
+    return this.roomConfig?.maxStackSize ?? DEFAULT_MAX_STACK_SIZE
   }
 
   // =========================================================================
@@ -406,9 +481,34 @@ export class RoomDO implements DurableObject {
       this.broadcast({
         kind: 'state',
         state: this.queueState,
+        playback: this.playbackState,
         extensionConnected: this.hasExtensionConnected(),
       })
     }
+  }
+
+  private broadcastSync(): void {
+    this.broadcast({ kind: 'sync', playback: this.playbackState })
+  }
+
+  private startPlayback(videoId: string): void {
+    this.playbackState = {
+      videoId,
+      startedAt: Date.now(),
+      position: 0,
+      playing: true,
+    }
+    this.broadcastSync()
+  }
+
+  private stopPlayback(): void {
+    this.playbackState = {
+      videoId: null,
+      startedAt: 0,
+      position: 0,
+      playing: false,
+    }
+    this.broadcastSync()
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -483,8 +583,25 @@ export class RoomDO implements DurableObject {
       if (path === '/api/room/config' && request.method === 'GET') {
         return this.handleGetConfig()
       }
+      if (path === '/api/room/config' && request.method === 'POST') {
+        return this.handleSetConfig(request)
+      }
       if (path === '/api/admin/verify' && request.method === 'POST') {
         return this.handleAdminVerify(request)
+      }
+
+      // Stack management endpoints (jukebox mode)
+      if (path === '/api/stack' && request.method === 'GET') {
+        return this.handleGetMyStack(request)
+      }
+      if (path === '/api/stack/add' && request.method === 'POST') {
+        return this.handleAddToStack(request)
+      }
+      if (path === '/api/stack/remove' && request.method === 'POST') {
+        return this.handleRemoveFromStack(request)
+      }
+      if (path === '/api/stack/reorder' && request.method === 'POST') {
+        return this.handleReorderStack(request)
       }
 
       return new Response('Not found', { status: 404 })
@@ -554,7 +671,14 @@ export class RoomDO implements DurableObject {
       }
 
       case 'ping': {
-        this.send(ws, { kind: 'pong' })
+        // Include server time for clock synchronization
+        this.send(ws, { kind: 'pong', serverTime: Date.now(), clientTime: msg.clientTime })
+        break
+      }
+
+      case 'syncRequest': {
+        // Client requesting current playback state for sync
+        this.send(ws, { kind: 'sync', playback: this.playbackState })
         break
       }
 
@@ -753,6 +877,129 @@ export class RoomDO implements DurableObject {
         break
       }
 
+      // =====================================================================
+      // Jukebox Mode Messages
+      // =====================================================================
+
+      case 'addSong': {
+        // Jukebox mode: add song to queue or stack based on user's current state
+        const sessionPayload = this.env
+          ? await verifySession(msg.sessionToken, this.env.SESSION_SECRET)
+          : null
+
+        if (!sessionPayload) {
+          this.send(ws, { kind: 'error', message: 'Invalid session' })
+          return
+        }
+
+        const userId = sessionPayload.sub
+        const displayName = sessionPayload.dn
+        const state = await this.getQueueState()
+
+        // Check if user can add directly to general queue
+        if (canAddToGeneralQueue(state, userId)) {
+          // Add directly to queue
+          const entry = createEntry({
+            id: generateId(),
+            name: displayName,
+            videoId: msg.videoId,
+            title: msg.title,
+            source: 'youtube',
+            currentEpoch: state.currentEpoch,
+            timestamp: Date.now(),
+          })
+          entry.userId = userId
+
+          state.queue.push(entry)
+          state.queue = sortQueueByMode(state.queue, this.getRoomMode())
+          await this.saveQueueState(state)
+
+          const position = state.queue.findIndex((e) => e.id === entry.id) + 1
+          this.send(ws, { kind: 'joined', entry, position })
+          this.broadcastState()
+        } else {
+          // Add to personal stack
+          const stack = await this.getUserStack(userId)
+          if (!canAddToStack(stack.length, this.getMaxStackSize())) {
+            this.send(ws, { kind: 'error', message: `Stack is full (max ${this.getMaxStackSize()} songs)` })
+            return
+          }
+
+          const song = createStackedSong({
+            id: generateId(),
+            videoId: msg.videoId,
+            title: msg.title,
+            source: 'youtube',
+            timestamp: Date.now(),
+          })
+
+          stack.push(song)
+          await this.setUserStack(userId, stack)
+
+          this.broadcast({ kind: 'stackUpdated', userId, stack })
+        }
+        break
+      }
+
+      case 'removeFromStack': {
+        const sessionPayload = this.env
+          ? await verifySession(msg.sessionToken, this.env.SESSION_SECRET)
+          : null
+
+        if (!sessionPayload) {
+          this.send(ws, { kind: 'error', message: 'Invalid session' })
+          return
+        }
+
+        const userId = sessionPayload.sub
+        const stack = await this.getUserStack(userId)
+        const newStack = stack.filter((s) => s.id !== msg.songId)
+
+        if (newStack.length === stack.length) {
+          this.send(ws, { kind: 'error', message: 'Song not found in stack' })
+          return
+        }
+
+        await this.setUserStack(userId, newStack)
+        this.broadcast({ kind: 'stackUpdated', userId, stack: newStack })
+        break
+      }
+
+      case 'reorderStack': {
+        const sessionPayload = this.env
+          ? await verifySession(msg.sessionToken, this.env.SESSION_SECRET)
+          : null
+
+        if (!sessionPayload) {
+          this.send(ws, { kind: 'error', message: 'Invalid session' })
+          return
+        }
+
+        const userId = sessionPayload.sub
+        const stack = await this.getUserStack(userId)
+
+        // Reorder based on provided order
+        const stackMap = new Map(stack.map((s) => [s.id, s]))
+        const newStack: StackedSong[] = []
+
+        for (const songId of msg.songIds) {
+          const song = stackMap.get(songId)
+          if (song) {
+            newStack.push(song)
+            stackMap.delete(songId)
+          }
+        }
+
+        // Append any songs not in the order list (shouldn't happen, but be safe)
+        for (const song of stackMap.values()) {
+          newStack.push(song)
+        }
+
+        await this.setUserStack(userId, newStack)
+        this.broadcast({ kind: 'stackUpdated', userId, stack: newStack })
+        break
+      }
+
       default:
         assertNever(msg)
     }
@@ -761,6 +1008,7 @@ export class RoomDO implements DurableObject {
   /**
    * Core queue advancement logic - shared by WebSocket and HTTP handlers
    * Records performance, advances queue, cleans up votes, broadcasts
+   * In jukebox mode, also promotes next song from the finished user's stack
    */
   private async doAdvanceQueueCore(
     state: QueueState,
@@ -768,6 +1016,9 @@ export class RoomDO implements DurableObject {
   ): Promise<{ newState: QueueState; firstSong: boolean }> {
     // Record performance before advancing
     let firstSong = false
+    const finishedUserId = state.nowPlaying?.userId
+    const finishedUserName = state.nowPlaying?.name ?? 'Unknown'
+
     if (state.nowPlaying) {
       const recordResult = await this.recordPerformance(state.nowPlaying, outcome)
       firstSong = recordResult.firstSong
@@ -781,7 +1032,43 @@ export class RoomDO implements DurableObject {
       await this.saveVotes(votes)
     }
 
+    // Jukebox mode: promote from finished user's stack to general queue
+    if (this.getRoomMode() === 'jukebox' && finishedUserId) {
+      const stack = await this.getUserStack(finishedUserId)
+      if (stack.length > 0) {
+        const promoted = promoteFromStack(
+          stack,
+          finishedUserId,
+          finishedUserName,
+          generateId(),
+          Date.now()
+        )
+
+        if (promoted) {
+          newState.queue.push(promoted.entry)
+          newState.queue = sortByVotes(newState.queue)
+          await this.setUserStack(finishedUserId, promoted.remainingStack)
+
+          // Notify about stack update
+          this.broadcast({
+            kind: 'promotedToQueue',
+            userId: finishedUserId,
+            entry: promoted.entry,
+            remainingStack: promoted.remainingStack,
+          })
+        }
+      }
+    }
+
     await this.saveQueueState(newState)
+
+    // Update playback sync state
+    if (newState.nowPlaying) {
+      this.startPlayback(newState.nowPlaying.videoId)
+    } else {
+      this.stopPlayback()
+    }
+
     this.broadcast({ kind: 'advanced', nowPlaying: newState.nowPlaying, currentEpoch: newState.currentEpoch })
     this.broadcastState()
 
@@ -1375,13 +1662,16 @@ export class RoomDO implements DurableObject {
       return Response.json(result, { status: 409 })
     }
 
-    // Create room config
+    // Create room config with jukebox mode defaults
     const config: RoomConfig = {
       id: roomId,
       displayName: displayName?.trim() || roomId,
       createdAt: Date.now(),
       maxQueueSize: 50,
       allowVoting: true,
+      mode: 'jukebox',                    // New default mode
+      requireAuth: false,                  // Allow anonymous users
+      maxStackSize: DEFAULT_MAX_STACK_SIZE,
     }
 
     // Create admin
@@ -1406,6 +1696,48 @@ export class RoomDO implements DurableObject {
       return Response.json({ error: 'Room not found' }, { status: 404 })
     }
     return Response.json(config)
+  }
+
+  private async handleSetConfig(request: Request): Promise<Response> {
+    // Require admin auth
+    const isAdmin = await this.isAdminRequest(request)
+    if (!isAdmin) {
+      const result: SetConfigResult = { kind: 'unauthorized' }
+      return Response.json(result, { status: 401 })
+    }
+
+    const config = await this.getRoomConfig()
+    if (!config) {
+      const result: SetConfigResult = { kind: 'roomNotFound' }
+      return Response.json(result, { status: 404 })
+    }
+
+    const body = (await request.json()) as { mode?: RoomMode }
+    const { mode } = body
+
+    if (mode && mode !== config.mode) {
+      const oldMode = config.mode
+      config.mode = mode
+      await this.saveRoomConfig(config)
+
+      // If switching to jukebox mode, re-sort queue by votes
+      if (mode === 'jukebox' && oldMode === 'karaoke') {
+        const state = await this.getQueueState()
+        state.queue = sortByVotes(state.queue)
+        await this.saveQueueState(state)
+        this.broadcastState()
+      }
+      // If switching to karaoke mode, re-sort queue by epochs
+      else if (mode === 'karaoke' && oldMode === 'jukebox') {
+        const state = await this.getQueueState()
+        state.queue = sortQueue(state.queue)
+        await this.saveQueueState(state)
+        this.broadcastState()
+      }
+    }
+
+    const result: SetConfigResult = { kind: 'updated', config }
+    return Response.json(result)
   }
 
   private async handleAdminVerify(request: Request): Promise<Response> {
@@ -1441,6 +1773,173 @@ export class RoomDO implements DurableObject {
 
     const session = this.createAdminSession()
     const result: AdminVerifyResult = { kind: 'verified', token: session.token }
+    return Response.json(result)
+  }
+
+  // =========================================================================
+  // Stack Management HTTP Endpoints (Jukebox Mode)
+  // =========================================================================
+
+  private async getAuthFromRequest(request: Request): Promise<{ userId: string; displayName: string } | null> {
+    if (!this.env) return null
+
+    const token = getSessionCookie(request)
+    if (!token) return null
+
+    const payload = await verifySession(token, this.env.SESSION_SECRET)
+    if (!payload) return null
+
+    return { userId: payload.sub, displayName: payload.dn }
+  }
+
+  private async handleGetMyStack(request: Request): Promise<Response> {
+    const auth = await this.getAuthFromRequest(request)
+    if (!auth) {
+      const result: GetMyStackResult = { kind: 'unauthenticated' }
+      return Response.json(result, { status: 401 })
+    }
+
+    const stack = await this.getUserStack(auth.userId)
+    const state = await this.getQueueState()
+    const inQueue = state.queue.find((e) => e.userId === auth.userId) ?? null
+
+    const result: GetMyStackResult = { kind: 'stack', songs: stack, inQueue }
+    return Response.json(result)
+  }
+
+  private async handleAddToStack(request: Request): Promise<Response> {
+    const auth = await this.getAuthFromRequest(request)
+    if (!auth) {
+      const result: AddToStackResult = { kind: 'unauthenticated' }
+      return Response.json(result, { status: 401 })
+    }
+
+    const body = (await request.json()) as { videoId?: string; title?: string }
+    const { videoId, title } = body
+
+    if (!videoId || !title) {
+      const result: AddToStackResult = { kind: 'error', message: 'videoId and title required' }
+      return Response.json(result, { status: 400 })
+    }
+
+    const state = await this.getQueueState()
+
+    // Check if user can add directly to general queue
+    if (canAddToGeneralQueue(state, auth.userId)) {
+      const entry = createEntry({
+        id: generateId(),
+        name: auth.displayName,
+        videoId,
+        title,
+        source: 'youtube',
+        currentEpoch: state.currentEpoch,
+        timestamp: Date.now(),
+      })
+      entry.userId = auth.userId
+
+      state.queue.push(entry)
+      state.queue = sortQueueByMode(state.queue, this.getRoomMode())
+      await this.saveQueueState(state)
+
+      const position = state.queue.findIndex((e) => e.id === entry.id) + 1
+      this.broadcastState()
+
+      const result: AddToStackResult = { kind: 'addedToQueue', entry, queuePosition: position }
+      return Response.json(result)
+    }
+
+    // Add to personal stack
+    const stack = await this.getUserStack(auth.userId)
+    const maxSize = this.getMaxStackSize()
+
+    if (!canAddToStack(stack.length, maxSize)) {
+      const result: AddToStackResult = { kind: 'stackFull', maxSize }
+      return Response.json(result, { status: 400 })
+    }
+
+    const song = createStackedSong({
+      id: generateId(),
+      videoId,
+      title,
+      source: 'youtube',
+      timestamp: Date.now(),
+    })
+
+    stack.push(song)
+    await this.setUserStack(auth.userId, stack)
+
+    this.broadcast({ kind: 'stackUpdated', userId: auth.userId, stack })
+
+    const result: AddToStackResult = { kind: 'added', song, stackPosition: stack.length }
+    return Response.json(result)
+  }
+
+  private async handleRemoveFromStack(request: Request): Promise<Response> {
+    const auth = await this.getAuthFromRequest(request)
+    if (!auth) {
+      const result: RemoveFromStackResult = { kind: 'unauthenticated' }
+      return Response.json(result, { status: 401 })
+    }
+
+    const body = (await request.json()) as { songId?: string }
+    const { songId } = body
+
+    if (!songId) {
+      const result: RemoveFromStackResult = { kind: 'error', message: 'songId required' }
+      return Response.json(result, { status: 400 })
+    }
+
+    const stack = await this.getUserStack(auth.userId)
+    const newStack = stack.filter((s) => s.id !== songId)
+
+    if (newStack.length === stack.length) {
+      const result: RemoveFromStackResult = { kind: 'notFound' }
+      return Response.json(result, { status: 404 })
+    }
+
+    await this.setUserStack(auth.userId, newStack)
+    this.broadcast({ kind: 'stackUpdated', userId: auth.userId, stack: newStack })
+
+    const result: RemoveFromStackResult = { kind: 'removed', songId }
+    return Response.json(result)
+  }
+
+  private async handleReorderStack(request: Request): Promise<Response> {
+    const auth = await this.getAuthFromRequest(request)
+    if (!auth) {
+      const result: ReorderStackResult = { kind: 'unauthenticated' }
+      return Response.json(result, { status: 401 })
+    }
+
+    const body = (await request.json()) as { songIds?: string[] }
+    const { songIds } = body
+
+    if (!songIds || !Array.isArray(songIds)) {
+      const result: ReorderStackResult = { kind: 'error', message: 'songIds array required' }
+      return Response.json(result, { status: 400 })
+    }
+
+    const stack = await this.getUserStack(auth.userId)
+    const stackMap = new Map(stack.map((s) => [s.id, s]))
+    const newStack: StackedSong[] = []
+
+    for (const id of songIds) {
+      const song = stackMap.get(id)
+      if (song) {
+        newStack.push(song)
+        stackMap.delete(id)
+      }
+    }
+
+    // Append any songs not in the order list
+    for (const song of stackMap.values()) {
+      newStack.push(song)
+    }
+
+    await this.setUserStack(auth.userId, newStack)
+    this.broadcast({ kind: 'stackUpdated', userId: auth.userId, stack: newStack })
+
+    const result: ReorderStackResult = { kind: 'reordered', stack: newStack }
     return Response.json(result)
   }
 }

@@ -1,9 +1,11 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import type { QueueState, Entry } from '@karaoke/types';
+  import type { QueueState, Entry, PlaybackState } from '@karaoke/types';
   import { createWebSocket, getState, getRoomId } from '$lib';
 
   const PAUSE_DURATION = 7000;
+  const SYNC_DRIFT_THRESHOLD_MS = 200; // Re-sync if drift exceeds 200ms
+  const SYNC_CHECK_INTERVAL_MS = 10000; // Check sync every 10 seconds
 
   let room = $state<QueueState>({ queue: [], nowPlaying: null, currentEpoch: 0 });
   let wsConnected = $state(false);
@@ -31,6 +33,10 @@
   let ws = createWebSocket();
   let previousNowPlaying: Entry | null = null;
 
+  // Sync state
+  let syncCheckInterval: ReturnType<typeof setInterval> | null = null;
+  let lastSyncPlayback: PlaybackState | null = null;
+
   // Derived
   const upNext = $derived(room.queue.slice(0, 5));
   const qrUrl = $derived(`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(`https://karaoke-queue.boris-47d.workers.dev/${roomId}`)}&bgcolor=0a0a0f&color=ffffff`);
@@ -38,15 +44,25 @@
   onMount(() => {
     roomId = getRoomId();
 
-    ws.onState((newState) => {
+    ws.onState((newState, playback) => {
       wsConnected = true;
       handleStateUpdate(newState);
+
+      // Handle initial playback state from state message
+      if (playback) {
+        handleSync(playback, ws.getServerTimeOffset());
+      }
 
       // Stop polling when WS connected
       if (pollInterval) {
         clearInterval(pollInterval);
         pollInterval = null;
       }
+    });
+
+    // Handle sync messages for multi-device synchronization
+    ws.onSync((playback, serverTimeOffset) => {
+      handleSync(playback, serverTimeOffset);
     });
 
     ws.connect('player');
@@ -69,6 +85,14 @@
         initPlayer();
       }
     }
+
+    // Start periodic sync check
+    startSyncCheck();
+
+    // Request sync when tab becomes visible (user returns to page)
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+    }
   });
 
   onDestroy(() => {
@@ -76,6 +100,10 @@
     if (pollInterval) clearInterval(pollInterval);
     if (pauseTimeout) clearTimeout(pauseTimeout);
     if (countdownInterval) clearInterval(countdownInterval);
+    if (syncCheckInterval) clearInterval(syncCheckInterval);
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    }
   });
 
   function startPolling() {
@@ -85,6 +113,60 @@
         if (state) handleStateUpdate(state);
       }
     }, 2000);
+  }
+
+  function startSyncCheck() {
+    if (syncCheckInterval) clearInterval(syncCheckInterval);
+    syncCheckInterval = setInterval(() => {
+      if (wsConnected && playerMode === 'playing_song' && lastSyncPlayback?.playing) {
+        // Request fresh sync state from server
+        ws.requestSync();
+      }
+    }, SYNC_CHECK_INTERVAL_MS);
+  }
+
+  function handleVisibilityChange() {
+    if (document.visibilityState === 'visible' && wsConnected) {
+      // Tab became visible - request sync to catch up
+      ws.requestSync();
+    }
+  }
+
+  function handleSync(playback: PlaybackState, serverTimeOffset: number) {
+    lastSyncPlayback = playback;
+
+    if (!playback.playing || !playback.videoId || !player || !playerReady) {
+      return;
+    }
+
+    // Only sync if we're supposed to be playing the same video
+    if (currentVideoId !== playback.videoId) {
+      return;
+    }
+
+    // Calculate where playback should be right now
+    const now = Date.now();
+    // Adjust for clock offset: server's "now" = our now + offset
+    const adjustedNow = now + serverTimeOffset;
+    const elapsedSinceStart = (adjustedNow - playback.startedAt) / 1000;
+    const targetPosition = playback.position + elapsedSinceStart;
+
+    // Get current player position
+    const currentPosition = player.getCurrentTime();
+    const drift = currentPosition - targetPosition;
+    const driftMs = Math.abs(drift * 1000);
+
+    // Only correct if drift exceeds threshold
+    if (driftMs > SYNC_DRIFT_THRESHOLD_MS) {
+      console.log(`[Sync] Drift detected: ${drift.toFixed(2)}s (${driftMs.toFixed(0)}ms), seeking to ${targetPosition.toFixed(2)}s`);
+      player.seekTo(targetPosition, true);
+
+      // Ensure video is playing
+      const playerState = player.getPlayerState();
+      if (playerState !== YT.PlayerState.PLAYING && playerState !== YT.PlayerState.BUFFERING) {
+        player.playVideo();
+      }
+    }
   }
 
   function handleStateUpdate(newState: QueueState) {

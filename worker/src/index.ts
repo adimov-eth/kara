@@ -1,6 +1,13 @@
 import type { Env } from './env.js'
 import type { FeedbackRequest } from '@karaoke/types'
 import { GUEST_HTML, PLAYER_HTML, ADMIN_HTML, LANDING_HTML } from './views/generated/index.js'
+import {
+  handleGoogleAuth,
+  handleGoogleCallback,
+  handleGetSession,
+  handleCreateAnonymousSession,
+  handleLogout,
+} from './auth.js'
 
 // Re-export RoomDO for Cloudflare to find it
 export { RoomDO } from './room.js'
@@ -270,6 +277,35 @@ export default {
     // Feedback endpoint (global, not room-scoped)
     if (path === '/api/feedback' && request.method === 'POST') {
       return handleFeedback(request, env)
+    }
+
+    // ==========================================================================
+    // Auth Routes
+    // ==========================================================================
+
+    // Google OAuth - redirect to Google
+    if (path === '/auth/google') {
+      return handleGoogleAuth(request, env)
+    }
+
+    // Google OAuth callback
+    if (path === '/auth/callback') {
+      return handleGoogleCallback(request, env)
+    }
+
+    // Get current session
+    if (path === '/auth/session' && request.method === 'GET') {
+      return addCorsHeaders(await handleGetSession(request, env))
+    }
+
+    // Create anonymous session
+    if (path === '/auth/anonymous' && request.method === 'POST') {
+      return addCorsHeaders(await handleCreateAnonymousSession(request, env))
+    }
+
+    // Logout
+    if (path === '/auth/logout' && request.method === 'POST') {
+      return addCorsHeaders(await handleLogout(request))
     }
 
     // API routes - proxy to DO

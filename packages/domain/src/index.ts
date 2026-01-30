@@ -1,9 +1,15 @@
 // Queue operations
 export {
   sortQueue,
+  sortByVotes,
+  sortQueueByMode,
   generateId,
   createEntry,
   canJoinQueue,
+  canAddToGeneralQueue,
+  canAddToStack,
+  createStackedSong,
+  promoteFromStack,
   applyVote,
   advanceQueue,
   removeFromQueue,

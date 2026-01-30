@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
-  import type { SearchResult, QueueState, Entry } from "@karaoke/types";
+  import type { SearchResult, QueueState, Entry, UserSession, User, RoomConfig } from "@karaoke/types";
   import {
     createWebSocket,
     join,
@@ -8,6 +8,8 @@
     remove as removeApi,
     skip as skipApi,
     getRoomId,
+    addSong,
+    getRoomConfig,
   } from "$lib";
   import { extractVideoId } from "@karaoke/domain";
   import { safeJsonParse } from "$lib/utils";
@@ -19,6 +21,8 @@
   import PinModal from "$lib/components/PinModal.svelte";
   import { toastStore } from "$lib/stores/toast.svelte";
   import HelpButton from "$lib/components/HelpButton.svelte";
+  import LoginButton from "$lib/components/LoginButton.svelte";
+  import MyStack from "$lib/components/MyStack.svelte";
 
   // State
   let room = $state<QueueState>({
@@ -30,6 +34,14 @@
   let voterId = $state("");
   let myVotes = $state<Record<string, number>>({});
   let verifiedNames = $state<Record<string, boolean>>({});
+
+  // Auth state
+  let session = $state<UserSession | null>(null);
+  let user = $state<User | null>(null);
+  let myStackRef = $state<MyStack | null>(null);
+
+  // Room config (for mode display)
+  let roomConfig = $state<RoomConfig | null>(null);
 
   // Form state
   let selectedSong = $state<SearchResult | null>(null);
@@ -80,9 +92,12 @@
     myName.trim().length > 0 && validatedUrl && !isInQueue && !isMyTurn,
   );
   const roomId = $derived(getRoomId());
+  const isLoggedIn = $derived(!!session);
+  const displayName = $derived(session?.displayName ?? myName);
+  const roomMode = $derived(roomConfig?.mode ?? 'jukebox');
 
   // Initialize
-  onMount(() => {
+  onMount(async () => {
     // Restore from localStorage
     myName = localStorage.getItem("karaoke_name") ?? "";
     voterId = localStorage.getItem("karaoke_voter_id") ?? crypto.randomUUID();
@@ -102,6 +117,9 @@
       tag.src = "https://www.youtube.com/iframe_api";
       document.head.appendChild(tag);
     }
+
+    // Fetch room config for mode display
+    roomConfig = await getRoomConfig();
   });
 
   onDestroy(() => {
@@ -474,15 +492,33 @@
     myName = "";
     document.getElementById("nameInput")?.focus();
   }
+
+  function handleSessionChange(newSession: UserSession | null, newUser: User | null) {
+    session = newSession;
+    user = newUser;
+    if (newSession) {
+      myName = newSession.displayName;
+    }
+  }
 </script>
 
 <div class="container">
   <header>
-    <h1>Karaoke</h1>
+    <div class="header-top">
+      <h1>Karaoke</h1>
+      <LoginButton onSessionChange={handleSessionChange} />
+    </div>
     <p class="subtitle">Pick a song, join the queue, sing your heart out</p>
-    <a href="/{roomId}/player" target="_blank" rel="noopener" class="player-link">
-      Open Player
-    </a>
+    <div class="header-actions">
+      {#if roomConfig}
+        <span class="mode-badge" class:jukebox={roomMode === 'jukebox'} class:karaoke={roomMode === 'karaoke'}>
+          {roomMode === 'jukebox' ? '🎵 Jukebox' : '🎤 Karaoke'}
+        </span>
+      {/if}
+      <a href="/{roomId}/player" target="_blank" rel="noopener" class="player-link">
+        Open Player
+      </a>
+    </div>
   </header>
 
   {#if room.nowPlaying}
@@ -591,6 +627,12 @@
     onVote={handleVote}
     onRemove={handleRemove}
   />
+
+  {#if isLoggedIn}
+    <div class="my-stack-section">
+      <MyStack bind:this={myStackRef} />
+    </div>
+  {/if}
 </div>
 
 <div id="validationPlayer" style="display: none;"></div>
@@ -623,6 +665,13 @@
     margin-bottom: 32px;
   }
 
+  .header-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+  }
+
   h1 {
     font-size: 2.5rem;
     font-weight: 800;
@@ -631,7 +680,11 @@
     -webkit-text-fill-color: transparent;
     background-clip: text;
     letter-spacing: -0.02em;
-    margin-bottom: 8px;
+    margin: 0;
+  }
+
+  .my-stack-section {
+    margin-top: 24px;
   }
 
   .subtitle {
@@ -640,11 +693,40 @@
     font-weight: 300;
   }
 
+  .header-actions {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    margin-top: 12px;
+  }
+
+  .mode-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 6px 12px;
+    border-radius: 20px;
+    font-size: 0.8rem;
+    font-weight: 500;
+  }
+
+  .mode-badge.jukebox {
+    background: rgba(78, 205, 196, 0.15);
+    color: var(--cyan);
+    border: 1px solid rgba(78, 205, 196, 0.2);
+  }
+
+  .mode-badge.karaoke {
+    background: rgba(255, 107, 157, 0.15);
+    color: var(--accent);
+    border: 1px solid rgba(255, 107, 157, 0.2);
+  }
+
   .player-link {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    margin-top: 12px;
     padding: 8px 16px;
     background: rgba(255, 255, 255, 0.05);
     border: 1px solid rgba(255, 255, 255, 0.1);
