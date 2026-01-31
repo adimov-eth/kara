@@ -93,6 +93,18 @@ describe('parseDuration', () => {
     expect(parseDuration('1:2:3:4')).toBe(0) // too many parts
   })
 
+  it('returns 0 for non-numeric parts (NaN edge case)', () => {
+    expect(parseDuration('abc:def')).toBe(0)
+    expect(parseDuration('3:abc')).toBe(0)
+    expect(parseDuration('abc:45')).toBe(0)
+    expect(parseDuration('1:two:3')).toBe(0)
+  })
+
+  it('returns 0 for whitespace-only input', () => {
+    expect(parseDuration('   ')).toBe(0)
+    expect(parseDuration('\t')).toBe(0)
+  })
+
   it('handles single digit components', () => {
     expect(parseDuration('1:05')).toBe(65)
     expect(parseDuration('0:09')).toBe(9)

@@ -1,9 +1,15 @@
 import { describe, it, expect } from 'vitest'
-import type { Entry, QueueState, VoteRecord } from '@karaoke/types'
+import type { Entry, QueueState, VoteRecord, StackedSong } from '@karaoke/types'
 import {
   sortQueue,
+  sortByVotes,
+  sortQueueByMode,
   createEntry,
   canJoinQueue,
+  canAddToGeneralQueue,
+  canAddToStack,
+  createStackedSong,
+  promoteFromStack,
   applyVote,
   advanceQueue,
   removeFromQueue,
@@ -518,5 +524,356 @@ describe('reorderEntry', () => {
     reorderEntry(queue, 'e2', 0)
 
     expect(queue.map((e) => e.id)).toEqual(originalOrder)
+  })
+})
+
+// ============================================================================
+// JUKEBOX MODE TESTS
+// ============================================================================
+
+// Helper to create stacked songs
+function makeStackedSong(overrides: Partial<StackedSong> = {}): StackedSong {
+  return {
+    id: 'stack-id',
+    videoId: 'abc123',
+    title: 'Stacked Song',
+    source: 'youtube',
+    addedAt: 1000,
+    ...overrides,
+  }
+}
+
+describe('sortByVotes', () => {
+  it('returns empty array for empty queue', () => {
+    expect(sortByVotes([])).toEqual([])
+  })
+
+  it('returns single entry unchanged', () => {
+    const entry = makeEntry()
+    expect(sortByVotes([entry])).toEqual([entry])
+  })
+
+  it('sorts by votes DESC (higher votes first)', () => {
+    const e1 = makeEntry({ id: 'e1', votes: 5 })
+    const e2 = makeEntry({ id: 'e2', votes: 10 })
+    const e3 = makeEntry({ id: 'e3', votes: 3 })
+
+    const result = sortByVotes([e1, e2, e3])
+    expect(result.map((e) => e.id)).toEqual(['e2', 'e1', 'e3'])
+  })
+
+  it('sorts by joinedAt ASC within same votes', () => {
+    const e1 = makeEntry({ id: 'e1', votes: 5, joinedAt: 3000 })
+    const e2 = makeEntry({ id: 'e2', votes: 5, joinedAt: 1000 })
+    const e3 = makeEntry({ id: 'e3', votes: 5, joinedAt: 2000 })
+
+    const result = sortByVotes([e1, e2, e3])
+    expect(result.map((e) => e.id)).toEqual(['e2', 'e3', 'e1'])
+  })
+
+  it('ignores epoch values entirely', () => {
+    const e1 = makeEntry({ id: 'e1', epoch: 0, votes: 5 })
+    const e2 = makeEntry({ id: 'e2', epoch: 100, votes: 10 }) // high epoch but high votes
+    const e3 = makeEntry({ id: 'e3', epoch: 1, votes: 3 })
+
+    const result = sortByVotes([e1, e2, e3])
+    // e2 has highest votes, should be first despite epoch 100
+    expect(result.map((e) => e.id)).toEqual(['e2', 'e1', 'e3'])
+  })
+
+  it('handles negative votes correctly', () => {
+    const e1 = makeEntry({ id: 'e1', votes: -2 })
+    const e2 = makeEntry({ id: 'e2', votes: 1 })
+    const e3 = makeEntry({ id: 'e3', votes: -5 })
+
+    const result = sortByVotes([e1, e2, e3])
+    expect(result.map((e) => e.id)).toEqual(['e2', 'e1', 'e3'])
+  })
+
+  it('handles zero votes with tiebreak on joinedAt', () => {
+    const e1 = makeEntry({ id: 'e1', votes: 0, joinedAt: 2000 })
+    const e2 = makeEntry({ id: 'e2', votes: 0, joinedAt: 1000 })
+
+    const result = sortByVotes([e1, e2])
+    expect(result.map((e) => e.id)).toEqual(['e2', 'e1'])
+  })
+
+  it('does not mutate original array', () => {
+    const original = [
+      makeEntry({ id: 'e1', votes: 0 }),
+      makeEntry({ id: 'e2', votes: 10 }),
+    ]
+    const originalCopy = [...original]
+    sortByVotes(original)
+    expect(original).toEqual(originalCopy)
+  })
+})
+
+describe('sortQueueByMode', () => {
+  it('uses sortByVotes for jukebox mode', () => {
+    const e1 = makeEntry({ id: 'e1', epoch: 0, votes: 5 })
+    const e2 = makeEntry({ id: 'e2', epoch: 1, votes: 10 })
+
+    const result = sortQueueByMode([e1, e2], 'jukebox')
+    // In jukebox, e2 wins by votes despite higher epoch
+    expect(result.map((e) => e.id)).toEqual(['e2', 'e1'])
+  })
+
+  it('uses sortQueue for karaoke mode', () => {
+    const e1 = makeEntry({ id: 'e1', epoch: 0, votes: 5 })
+    const e2 = makeEntry({ id: 'e2', epoch: 1, votes: 10 })
+
+    const result = sortQueueByMode([e1, e2], 'karaoke')
+    // In karaoke, e1 wins by lower epoch
+    expect(result.map((e) => e.id)).toEqual(['e1', 'e2'])
+  })
+})
+
+describe('canAddToGeneralQueue', () => {
+  it('returns true when user has no entries in queue or nowPlaying', () => {
+    const state = makeState({
+      queue: [makeEntry({ userId: 'user-a' })],
+      nowPlaying: makeEntry({ userId: 'user-b' }),
+    })
+
+    expect(canAddToGeneralQueue(state, 'user-c')).toBe(true)
+  })
+
+  it('returns false when user already has entry in queue', () => {
+    const state = makeState({
+      queue: [makeEntry({ userId: 'user-a' })],
+    })
+
+    expect(canAddToGeneralQueue(state, 'user-a')).toBe(false)
+  })
+
+  it('returns false when user is currently playing', () => {
+    const state = makeState({
+      nowPlaying: makeEntry({ userId: 'user-a' }),
+    })
+
+    expect(canAddToGeneralQueue(state, 'user-a')).toBe(false)
+  })
+
+  it('returns false when user has entry in queue AND is playing', () => {
+    const state = makeState({
+      queue: [makeEntry({ userId: 'user-a' })],
+      nowPlaying: makeEntry({ userId: 'user-a' }),
+    })
+
+    expect(canAddToGeneralQueue(state, 'user-a')).toBe(false)
+  })
+
+  it('returns true for empty queue and no nowPlaying', () => {
+    const state = makeState()
+    expect(canAddToGeneralQueue(state, 'any-user')).toBe(true)
+  })
+
+  it('handles entries without userId (legacy karaoke entries)', () => {
+    // Legacy entries might not have userId - they shouldn't block new users
+    const state = makeState({
+      queue: [makeEntry({ userId: undefined })],
+    })
+
+    // A user with a defined userId should still be able to add
+    expect(canAddToGeneralQueue(state, 'user-a')).toBe(true)
+  })
+
+  it('handles undefined userId in nowPlaying', () => {
+    const state = makeState({
+      nowPlaying: makeEntry({ userId: undefined }),
+    })
+
+    expect(canAddToGeneralQueue(state, 'user-a')).toBe(true)
+  })
+})
+
+describe('canAddToStack', () => {
+  it('returns true when stack size is below max', () => {
+    expect(canAddToStack(0, 10)).toBe(true)
+    expect(canAddToStack(5, 10)).toBe(true)
+    expect(canAddToStack(9, 10)).toBe(true)
+  })
+
+  it('returns false when stack size equals max', () => {
+    expect(canAddToStack(10, 10)).toBe(false)
+  })
+
+  it('returns false when stack size exceeds max', () => {
+    expect(canAddToStack(11, 10)).toBe(false)
+  })
+
+  it('works with max size of 0', () => {
+    expect(canAddToStack(0, 0)).toBe(false)
+  })
+
+  it('works with max size of 1', () => {
+    expect(canAddToStack(0, 1)).toBe(true)
+    expect(canAddToStack(1, 1)).toBe(false)
+  })
+})
+
+describe('createStackedSong', () => {
+  it('creates a stacked song with provided values', () => {
+    const song = createStackedSong({
+      id: 'stack-1',
+      videoId: 'xyz789',
+      title: 'My Song',
+      source: 'youtube',
+      timestamp: 5000,
+    })
+
+    expect(song).toEqual({
+      id: 'stack-1',
+      videoId: 'xyz789',
+      title: 'My Song',
+      source: 'youtube',
+      addedAt: 5000,
+    })
+  })
+
+  it('trims title to 100 characters', () => {
+    const longTitle = 'A'.repeat(150)
+    const song = createStackedSong({
+      id: 'id',
+      videoId: 'vid',
+      title: longTitle,
+      source: 'youtube',
+      timestamp: 0,
+    })
+
+    expect(song.title).toHaveLength(100)
+    expect(song.title).toBe('A'.repeat(100))
+  })
+
+  it('supports spotify source', () => {
+    const song = createStackedSong({
+      id: 'id',
+      videoId: 'spotify-track-id',
+      title: 'Spotify Song',
+      source: 'spotify',
+      timestamp: 0,
+    })
+
+    expect(song.source).toBe('spotify')
+  })
+})
+
+describe('promoteFromStack', () => {
+  it('returns null for empty stack', () => {
+    const result = promoteFromStack([], 'user-1', 'User Name', 'entry-id', 1000)
+    expect(result).toBeNull()
+  })
+
+  it('promotes first song from stack (FIFO order)', () => {
+    const stack = [
+      makeStackedSong({ id: 's1', videoId: 'vid1', title: 'First' }),
+      makeStackedSong({ id: 's2', videoId: 'vid2', title: 'Second' }),
+      makeStackedSong({ id: 's3', videoId: 'vid3', title: 'Third' }),
+    ]
+
+    const result = promoteFromStack(stack, 'user-1', 'Singer Name', 'entry-id', 5000)
+
+    expect(result).not.toBeNull()
+    if (result === null) return // Type guard for TypeScript
+    expect(result.entry.videoId).toBe('vid1')
+    expect(result.entry.title).toBe('First')
+    expect(result.remainingStack).toHaveLength(2)
+    expect(result.remainingStack[0]?.videoId).toBe('vid2')
+    expect(result.remainingStack[1]?.videoId).toBe('vid3')
+  })
+
+  it('creates entry with correct shape', () => {
+    const stack = [
+      makeStackedSong({
+        id: 's1',
+        videoId: 'vid123',
+        title: 'Test Song',
+        source: 'youtube',
+      }),
+    ]
+
+    const result = promoteFromStack(stack, 'user-abc', 'Display Name', 'new-entry-id', 9999)
+
+    expect(result).not.toBeNull()
+    if (result === null) return
+    expect(result.entry).toEqual({
+      id: 'new-entry-id',
+      name: 'Display Name',
+      videoId: 'vid123',
+      title: 'Test Song',
+      source: 'youtube',
+      votes: 0,
+      epoch: 0,
+      joinedAt: 9999,
+      userId: 'user-abc',
+    })
+  })
+
+  it('sets epoch to 0 (jukebox mode ignores epochs)', () => {
+    const stack = [makeStackedSong()]
+    const result = promoteFromStack(stack, 'user-1', 'Name', 'id', 1000)
+
+    expect(result).not.toBeNull()
+    if (result === null) return
+    expect(result.entry.epoch).toBe(0)
+  })
+
+  it('initializes votes to 0', () => {
+    const stack = [makeStackedSong()]
+    const result = promoteFromStack(stack, 'user-1', 'Name', 'id', 1000)
+
+    expect(result).not.toBeNull()
+    if (result === null) return
+    expect(result.entry.votes).toBe(0)
+  })
+
+  it('attaches userId to promoted entry', () => {
+    const stack = [makeStackedSong()]
+    const result = promoteFromStack(stack, 'my-user-id', 'Name', 'id', 1000)
+
+    expect(result).not.toBeNull()
+    if (result === null) return
+    expect(result.entry.userId).toBe('my-user-id')
+  })
+
+  it('uses provided timestamp for joinedAt', () => {
+    const stack = [makeStackedSong()]
+    const result = promoteFromStack(stack, 'user-1', 'Name', 'id', 12345)
+
+    expect(result).not.toBeNull()
+    if (result === null) return
+    expect(result.entry.joinedAt).toBe(12345)
+  })
+
+  it('returns empty array when promoting last song', () => {
+    const stack = [makeStackedSong()]
+    const result = promoteFromStack(stack, 'user-1', 'Name', 'id', 1000)
+
+    expect(result).not.toBeNull()
+    if (result === null) return
+    expect(result.remainingStack).toEqual([])
+  })
+
+  it('does not mutate original stack', () => {
+    const stack = [
+      makeStackedSong({ id: 's1' }),
+      makeStackedSong({ id: 's2' }),
+    ]
+    const originalLength = stack.length
+
+    promoteFromStack(stack, 'user-1', 'Name', 'id', 1000)
+
+    expect(stack).toHaveLength(originalLength)
+    expect(stack[0]?.id).toBe('s1')
+  })
+
+  it('preserves source from stacked song', () => {
+    const stack = [makeStackedSong({ source: 'spotify' })]
+    const result = promoteFromStack(stack, 'user-1', 'Name', 'id', 1000)
+
+    expect(result).not.toBeNull()
+    if (result === null) return
+    expect(result.entry.source).toBe('spotify')
   })
 })

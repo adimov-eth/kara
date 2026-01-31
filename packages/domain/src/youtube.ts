@@ -43,9 +43,15 @@ export function buildEmbedUrl(videoId: string): string {
 
 /**
  * Parse duration string (e.g., "3:45" or "1:23:45") to seconds
+ * Returns 0 for invalid input (empty string, non-numeric parts, wrong format)
  */
 export function parseDuration(durationText: string): number {
+  if (!durationText || durationText.trim() === '') return 0
+
   const parts = durationText.split(':').map(Number)
+
+  // Check for NaN values (invalid numeric parts)
+  if (parts.some((p) => Number.isNaN(p))) return 0
 
   if (parts.length === 2) {
     const [minutes, seconds] = parts

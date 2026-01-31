@@ -1,5 +1,20 @@
 import type { Entry, QueueState, VoteRecord, StackedSong, RoomMode } from '@karaoke/types'
 
+// =============================================================================
+// Helpers
+// =============================================================================
+
+/**
+ * Case-insensitive name comparison
+ */
+function namesMatch(a: string, b: string): boolean {
+  return a.toLowerCase() === b.toLowerCase()
+}
+
+// =============================================================================
+// Sorting
+// =============================================================================
+
 /**
  * Sort queue by epoch ASC, votes DESC, joinedAt ASC (karaoke mode)
  * Pure function - returns a new sorted array
@@ -82,18 +97,13 @@ export function canJoinQueue(
   state: QueueState,
   name: string
 ): string | null {
-  const trimmedName = name.trim().toLowerCase()
+  const trimmedName = name.trim()
 
-  // Check if user already has an entry in queue
-  if (state.queue.some((e) => e.name.toLowerCase() === trimmedName)) {
+  if (state.queue.some((e) => namesMatch(e.name, trimmedName))) {
     return 'You already have a song in the queue'
   }
 
-  // Check if currently playing
-  if (
-    state.nowPlaying &&
-    state.nowPlaying.name.toLowerCase() === trimmedName
-  ) {
+  if (state.nowPlaying && namesMatch(state.nowPlaying.name, trimmedName)) {
     return 'Wait until your current song finishes'
   }
 
@@ -159,17 +169,17 @@ export function promoteFromStack(
   entryId: string,
   timestamp: number
 ): { entry: Entry; remainingStack: StackedSong[] } | null {
-  if (stack.length === 0) return null
+  const first = stack[0]
+  if (!first) return null
 
-  const [first, ...rest] = stack
-  const song = first!
+  const rest = stack.slice(1)
 
   const entry: Entry = {
     id: entryId,
     name: displayName,
-    videoId: song.videoId,
-    title: song.title,
-    source: song.source,
+    videoId: first.videoId,
+    title: first.title,
+    source: first.source,
     votes: 0,
     epoch: 0, // Not used in jukebox mode
     joinedAt: timestamp,
@@ -226,8 +236,7 @@ export function advanceQueue(state: QueueState): {
   completed: Entry | null
 } {
   const completed = state.nowPlaying
-  const newQueue = [...state.queue]
-  const nowPlaying = newQueue.length > 0 ? newQueue.shift()! : null
+  const [nowPlaying = null, ...newQueue] = state.queue
 
   return {
     state: {
@@ -269,7 +278,7 @@ export function canRemoveEntry(
 ): boolean {
   if (isAdmin) return true
   if (!userName) return false
-  return entry.name.toLowerCase() === userName.toLowerCase()
+  return namesMatch(entry.name, userName)
 }
 
 /**
@@ -283,7 +292,7 @@ export function canSkipCurrent(
   if (!nowPlaying) return false
   if (isAdmin) return true
   if (!userName) return false
-  return nowPlaying.name.toLowerCase() === userName.toLowerCase()
+  return namesMatch(nowPlaying.name, userName)
 }
 
 /**
@@ -299,8 +308,11 @@ export function reorderEntry(
   const entryIndex = queue.findIndex((e) => e.id === entryId)
   if (entryIndex === -1) return null
 
+  const original = queue[entryIndex]
+  if (!original) return null // TypeScript guard (redundant but appeases linter)
+
+  const entry = { ...original }
   const newQueue = [...queue]
-  const entry = { ...newQueue[entryIndex]! }
   newQueue.splice(entryIndex, 1)
 
   const targetIndex = Math.min(Math.max(0, newPosition), newQueue.length)
