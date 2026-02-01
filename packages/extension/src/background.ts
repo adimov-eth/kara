@@ -1,7 +1,7 @@
 import type { QueueState } from '@karaoke/types'
 import type { ExtensionToServer, BackgroundToContent, ContentToBackground, StoredState } from './types.js'
 
-const WS_URL = 'wss://karaoke-queue.boris-47d.workers.dev/?upgrade=websocket'
+const WS_URL = 'wss://karaoke-queue.boris-47d.workers.dev/?upgrade=websocket&clientType=extension'
 const MAX_RECONNECT_DELAY = 30000
 const KEEPALIVE_INTERVAL = 0.5 // minutes
 
