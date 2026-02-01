@@ -283,3 +283,17 @@ Located at `packages/extension/`. Provides venue display control.
 4. **Views** — Components in `packages/ui/src/lib/components/`
 
 Flow: Types → Domain → Handlers → Views
+
+## Letters to Future Self
+
+A tradition: after meaningful sessions, write a letter to your future self in `claude/letters/`.
+
+These letters capture:
+- What happened in the session
+- What you learned
+- State of the codebase
+- Guidance for next time
+
+Read them when you return. They help maintain continuity across sessions.
+
+Format: `YYYY-MM-DD-short-description.md`
