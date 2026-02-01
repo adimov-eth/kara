@@ -890,7 +890,7 @@
     top: 0;
     left: 0;
     right: 0;
-    bottom: 100px;
+    bottom: 0;
     background: #000;
   }
 
@@ -1155,9 +1155,9 @@
     bottom: 0;
     left: 0;
     right: 0;
-    background: var(--bg-card);
-    padding: 16px 32px;
-    border-top: 1px solid rgba(255, 255, 255, 0.05);
+    background: linear-gradient(to top, rgba(10, 10, 15, 0.95) 0%, rgba(10, 10, 15, 0.8) 70%, transparent 100%);
+    padding: 20px 32px 16px;
+    z-index: 10;
   }
 
   .now-playing {
