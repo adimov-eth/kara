@@ -19,6 +19,7 @@ type ChatPinnedHandler = (message: ChatMessage) => void;
 type ChatUnpinnedHandler = (messageId: string) => void;
 type EnergyHandler = (state: EnergyState) => void;
 type EnergySkipHandler = () => void;
+type RemovedHandler = (entryId: string) => void;
 
 // Conditional logging - only in development
 const isDev = typeof window !== 'undefined' &&
@@ -48,6 +49,7 @@ interface WebSocketManager {
   onChatUnpinned(handler: ChatUnpinnedHandler): void;
   onEnergy(handler: EnergyHandler): void;
   onEnergySkip(handler: EnergySkipHandler): void;
+  onRemoved(handler: RemovedHandler): void;
   requestSync(): void;
   getServerTimeOffset(): number;
   isConnected(): boolean;
@@ -73,6 +75,7 @@ export function createWebSocket(): WebSocketManager {
   let chatUnpinnedHandler: ChatUnpinnedHandler | null = null;
   let energyHandler: EnergyHandler | null = null;
   let energySkipHandler: EnergySkipHandler | null = null;
+  let removedHandler: RemovedHandler | null = null;
 
   // Server time offset for synchronized playback (serverTime - clientTime)
   let serverTimeOffset = 0;
@@ -149,6 +152,9 @@ export function createWebSocket(): WebSocketManager {
       case 'energySkip':
         energySkipHandler?.();
         break;
+      case 'removed':
+        removedHandler?.(msg.entryId);
+        break;
       case 'error':
         logError('Server error:', msg.message);
         break;
@@ -162,7 +168,7 @@ export function createWebSocket(): WebSocketManager {
 
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const roomId = getRoomId();
-    const wsUrl = `${protocol}//${location.host}/?upgrade=websocket&room=${encodeURIComponent(roomId)}`;
+    const wsUrl = `${protocol}//${location.host}/?upgrade=websocket&room=${encodeURIComponent(roomId)}&clientType=${encodeURIComponent(clientType)}`;
 
     try {
       ws = new WebSocket(wsUrl);
@@ -254,6 +260,9 @@ export function createWebSocket(): WebSocketManager {
     },
     onEnergySkip(handler: EnergySkipHandler) {
       energySkipHandler = handler;
+    },
+    onRemoved(handler: RemovedHandler) {
+      removedHandler = handler;
     },
     requestSync() {
       send({ kind: 'syncRequest' });

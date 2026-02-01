@@ -90,6 +90,7 @@ const ADMIN_KEY = 'admin'
 const USER_STACKS_KEY = 'user_stacks'
 
 const DEFAULT_MAX_STACK_SIZE = 10
+const TIMERS_KEY = 'timers'
 
 const ADMIN_SESSION_DURATION_MS = 4 * 60 * 60 * 1000 // 4 hours
 const PIN_RATE_LIMIT_WINDOW_MS = 60 * 1000 // 1 minute
@@ -142,6 +143,19 @@ interface SearchCacheEntry {
   expiresAt: number
 }
 
+// Serialized per-socket metadata that survives DO hibernation
+interface SocketAttachment {
+  clientType: ClientType
+  userId?: string
+  displayName?: string
+}
+
+// Persisted timer deadlines (replaces setTimeout for hibernation safety)
+interface PendingTimers {
+  pinnedMessageExpiry?: number
+  pinnedMessageId?: string
+}
+
 export class RoomDO implements DurableObject {
   private state: DurableObjectState
   private env: Env | null = null
@@ -175,9 +189,10 @@ export class RoomDO implements DurableObject {
   private chatMessages: ChatMessage[] = []
   private pinnedMessage: ChatMessage | null = null
   private pinnedMessageAt: number | null = null
-  private pinnedMessageTimeout: ReturnType<typeof setTimeout> | null = null
   private energyBelowThresholdSince: number | null = null
   private lastEnergyLevel: number | null = null
+  // Tracks whether in-memory Maps have been rebuilt from WebSocket attachments after hibernation wake
+  private mapsRebuilt = false
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state
@@ -477,6 +492,60 @@ export class RoomDO implements DurableObject {
            'unknown'
   }
 
+  // =========================================================================
+  // WebSocket Hibernation Support
+  // =========================================================================
+
+  private setSocketAttachment(ws: WebSocket, attachment: SocketAttachment): void {
+    ws.serializeAttachment(attachment)
+  }
+
+  private getSocketAttachment(ws: WebSocket): SocketAttachment | null {
+    try {
+      return ws.deserializeAttachment() as SocketAttachment | null
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * Rebuild in-memory Maps from WebSocket attachments after hibernation wake.
+   * Attachments survive hibernation; Maps don't. This bridges the gap.
+   */
+  private rebuildMapsFromAttachments(): void {
+    this.socketClients.clear()
+    this.extensionSockets.clear()
+    this.socketIdentities.clear()
+
+    for (const ws of this.state.getWebSockets()) {
+      const attachment = this.getSocketAttachment(ws)
+      if (!attachment) continue
+
+      this.socketClients.set(ws, attachment.clientType)
+      if (attachment.clientType === 'extension') {
+        this.extensionSockets.add(ws)
+      }
+      if (attachment.userId && attachment.displayName) {
+        this.socketIdentities.set(ws, {
+          userId: attachment.userId,
+          displayName: attachment.displayName,
+        })
+      }
+    }
+    this.mapsRebuilt = true
+  }
+
+  /**
+   * Ensure Maps are rebuilt from attachments. Called at every platform entry point
+   * (fetch, webSocketMessage, webSocketClose, webSocketError, alarm).
+   * O(1) after first rebuild; O(n) on first call after wake where n = connected sockets.
+   */
+  private ensureMapsRebuilt(): void {
+    if (!this.mapsRebuilt) {
+      this.rebuildMapsFromAttachments()
+    }
+  }
+
   private async getIdentityFromRequest(request: Request): Promise<{ userId: string; displayName: string } | null> {
     if (!this.env) return null
     const token = getSessionCookie(request)
@@ -521,6 +590,7 @@ export class RoomDO implements DurableObject {
   }
 
   private hasExtensionConnected(): boolean {
+    this.ensureMapsRebuilt()
     // Clean up any stale references first
     for (const ws of this.extensionSockets) {
       if (ws.readyState !== WebSocket.OPEN) {
@@ -548,6 +618,7 @@ export class RoomDO implements DurableObject {
     message: ServerMessage,
     exclude?: WebSocket
   ): void {
+    this.ensureMapsRebuilt()
     const data = JSON.stringify(message)
     const allowed = new Set(clientTypes)
     for (const ws of this.getConnections()) {
@@ -678,7 +749,7 @@ export class RoomDO implements DurableObject {
 
     if (now - this.energyBelowThresholdSince >= config.energySkipDuration * 1000) {
       this.energyBelowThresholdSince = null
-      this.broadcastToClientTypes(['player'], { kind: 'energySkip' })
+      this.broadcastToClientTypes(['player', 'user'], { kind: 'energySkip' })
       await this.doAdvanceQueue(state, { kind: 'skipped', by: 'admin' })
     }
   }
@@ -687,22 +758,14 @@ export class RoomDO implements DurableObject {
     if (!this.pinnedMessage) return
     this.pinnedMessage = null
     this.pinnedMessageAt = null
-    if (this.pinnedMessageTimeout) {
-      clearTimeout(this.pinnedMessageTimeout)
-      this.pinnedMessageTimeout = null
-    }
     this.broadcastToClientTypes(['player'], { kind: 'chatUnpinned', messageId })
   }
 
-  private schedulePinnedMessageClear(messageId: string): void {
-    if (this.pinnedMessageTimeout) {
-      clearTimeout(this.pinnedMessageTimeout)
-    }
-    this.pinnedMessageTimeout = setTimeout(() => {
-      if (this.pinnedMessage?.id === messageId) {
-        this.clearPinnedMessage(messageId)
-      }
-    }, PINNED_MESSAGE_TTL_MS)
+  private async schedulePinnedMessageClear(messageId: string): Promise<void> {
+    const expiry = Date.now() + PINNED_MESSAGE_TTL_MS
+    const timers: PendingTimers = { pinnedMessageExpiry: expiry, pinnedMessageId: messageId }
+    await this.state.storage.put(TIMERS_KEY, timers)
+    await this.state.storage.setAlarm(expiry)
   }
 
   private sendPinnedMessageIfActive(ws: WebSocket): void {
@@ -716,6 +779,7 @@ export class RoomDO implements DurableObject {
   }
 
   async fetch(request: Request): Promise<Response> {
+    this.ensureMapsRebuilt()
     const url = new URL(request.url)
 
     // WebSocket upgrade
@@ -819,18 +883,40 @@ export class RoomDO implements DurableObject {
     const pair = new WebSocketPair()
     const [client, server] = [pair[0], pair[1]]
 
-    // Accept with default tag (will be updated on subscribe)
-    this.state.acceptWebSocket(server, ['type:user'])
+    // Read client type from URL param (enables correct tags at accept time)
+    const url = new URL(request.url)
+    const clientTypeParam = url.searchParams.get('clientType')
+    const validClientTypes = new Set<string>(['user', 'player', 'admin', 'extension'])
+    const clientType: ClientType = validClientTypes.has(clientTypeParam ?? '')
+      ? clientTypeParam as ClientType
+      : 'user'
 
+    // Accept with tag based on declared client type (tags survive hibernation)
+    this.state.acceptWebSocket(server, [`type:${clientType}`])
+
+    // Extract identity from session cookie
     const identity = await this.getIdentityFromRequest(request)
+
+    // Build and serialize attachment (survives hibernation)
+    const attachment: SocketAttachment = { clientType }
     if (identity) {
+      attachment.userId = identity.userId
+      attachment.displayName = identity.displayName
       this.socketIdentities.set(server, identity)
+    }
+    this.setSocketAttachment(server, attachment)
+
+    // Update in-memory maps
+    this.socketClients.set(server, clientType)
+    if (clientType === 'extension') {
+      this.extensionSockets.add(server)
     }
 
     return new Response(null, { status: 101, webSocket: client })
   }
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    this.ensureMapsRebuilt()
     if (typeof message !== 'string') return
 
     try {
@@ -842,6 +928,7 @@ export class RoomDO implements DurableObject {
   }
 
   async webSocketClose(ws: WebSocket): Promise<void> {
+    this.ensureMapsRebuilt()
     // Check if this was an extension
     const wasExtension = this.extensionSockets.has(ws)
     this.extensionSockets.delete(ws)
@@ -855,18 +942,55 @@ export class RoomDO implements DurableObject {
     }
   }
 
-  async webSocketError(_ws: WebSocket): Promise<void> {
+  async webSocketError(ws: WebSocket): Promise<void> {
+    this.ensureMapsRebuilt()
+    // Clean up Maps for the errored socket
+    this.extensionSockets.delete(ws)
+    this.socketClients.delete(ws)
+    this.socketIdentities.delete(ws)
     // WebSocket is automatically removed from state.getWebSockets()
+  }
+
+  /**
+   * Durable Object alarm handler. Replaces setTimeout for hibernation safety.
+   * Fires when a scheduled timer deadline is reached (e.g., pinned message expiry).
+   */
+  async alarm(): Promise<void> {
+    this.ensureMapsRebuilt()
+
+    const timers = await this.state.storage.get<PendingTimers>(TIMERS_KEY)
+    if (!timers) return
+
+    const now = Date.now()
+
+    if (timers.pinnedMessageExpiry && now >= timers.pinnedMessageExpiry && timers.pinnedMessageId) {
+      if (this.pinnedMessage?.id === timers.pinnedMessageId) {
+        // Message still pinned in memory — clear it normally
+        this.clearPinnedMessage(timers.pinnedMessageId)
+      } else {
+        // After hibernation wake, pinnedMessage is null but the player may still display it.
+        // Send unpin to ensure the player clears the stale pinned message.
+        this.broadcastToClientTypes(['player'], { kind: 'chatUnpinned', messageId: timers.pinnedMessageId })
+      }
+    }
+
+    // Clean up timer storage
+    await this.state.storage.delete(TIMERS_KEY)
   }
 
   private async handleClientMessage(ws: WebSocket, msg: ClientMessage): Promise<void> {
     switch (msg.kind) {
       case 'subscribe': {
-        // Track extension connections separately
+        // Update in-memory maps
         if (msg.clientType === 'extension') {
           this.extensionSockets.add(ws)
         }
         this.socketClients.set(ws, msg.clientType)
+
+        // Update attachment with declared client type (authoritative over URL param)
+        const currentAttachment = this.getSocketAttachment(ws) ?? { clientType: 'user' as ClientType }
+        currentAttachment.clientType = msg.clientType
+        this.setSocketAttachment(ws, currentAttachment)
 
         const state = await this.getQueueState()
         this.send(ws, {
@@ -989,7 +1113,7 @@ export class RoomDO implements DurableObject {
         this.pinnedMessage = message
         this.pinnedMessageAt = Date.now()
         this.broadcastToClientTypes(['player'], { kind: 'chatPinned', message })
-        this.schedulePinnedMessageClear(message.id)
+        await this.schedulePinnedMessageClear(message.id)
         break
       }
 

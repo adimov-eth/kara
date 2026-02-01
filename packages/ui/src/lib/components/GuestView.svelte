@@ -31,6 +31,7 @@
   import Queue from "$lib/components/Queue.svelte";
   import PinModal from "$lib/components/PinModal.svelte";
   import { toastStore } from "$lib/stores/toast.svelte";
+  import { personalStore } from "$lib/stores/personal.svelte";
   import HelpButton from "$lib/components/HelpButton.svelte";
   import LoginButton from "$lib/components/LoginButton.svelte";
   import MyStack from "$lib/components/MyStack.svelte";
@@ -132,10 +133,15 @@
 
     // Connect WebSocket
     ws.onState(handleStateUpdate);
+    ws.onRemoved((entryId) => personalStore.handleRemoved(entryId));
+    ws.onEnergySkip(() => personalStore.handleEnergySkip());
     ws.onChat((message) => {
       chatMessages = [...chatMessages, message].slice(-100);
     });
     ws.connect("user");
+
+    // Initialize personal store identity
+    personalStore.setIdentity(myName, session?.userId);
 
     // Load YouTube API
     if (typeof window !== "undefined" && !window.YT) {
@@ -168,31 +174,34 @@
     const isNowPlaying = newState.nowPlaying?.name.toLowerCase() === nameLower;
 
     if (wasPlaying && !isNowPlaying && myName) {
-      // Song finished - show stats
-      const finalVotes = previousEntry?.votes ?? 0;
-      const voteMsg =
-        finalVotes > 0
-          ? `+${finalVotes}`
-          : finalVotes === 0
-            ? "0"
-            : `${finalVotes}`;
+      // Check if this was an energy skip (personal store already showed the right toast)
+      if (!personalStore.consumeEnergySkipFlag()) {
+        // Normal completion or admin skip — show stats
+        const finalVotes = previousEntry?.votes ?? 0;
+        const voteMsg =
+          finalVotes > 0
+            ? `+${finalVotes}`
+            : finalVotes === 0
+              ? "0"
+              : `${finalVotes}`;
 
-      const isVerified = verifiedNames[nameLower] === true;
-      if (!isVerified) {
-        toastStore.success(`Nice! You got ${voteMsg} votes`);
-        // Show PIN claim modal after a beat
-        setTimeout(() => {
-          pinName = myName;
-          pinMode = "claim";
-        }, 1500);
-      } else {
-        toastStore.success(`You got ${voteMsg} votes! Add another?`);
+        const isVerified = verifiedNames[nameLower] === true;
+        if (!isVerified) {
+          toastStore.success(`Nice! You got ${voteMsg} votes`);
+          // Show PIN claim modal after a beat
+          setTimeout(() => {
+            pinName = myName;
+            pinMode = "claim";
+          }, 1500);
+        } else {
+          toastStore.success(`You got ${voteMsg} votes! Add another?`);
+        }
+
+        // Show cinematic recap
+        recapVotes = finalVotes;
+        showRecap = true;
+        setTimeout(() => (showRecap = false), 4000);
       }
-
-      // Show cinematic recap
-      recapVotes = finalVotes;
-      showRecap = true;
-      setTimeout(() => (showRecap = false), 4000);
     }
 
     // Position change notifications (only if we were already in queue)
@@ -228,6 +237,10 @@
     previousPosition = newPosition;
     previousEntry = newMyEntry ?? null;
     room = newState;
+
+    // Keep personal store in sync
+    personalStore.setIdentity(myName, session?.userId);
+    personalStore.trackState(newState);
   }
 
   function handleNameInput(e: Event) {
@@ -579,6 +592,7 @@
     if (newSession) {
       myName = newSession.displayName;
     }
+    personalStore.setIdentity(myName, newSession?.userId);
   }
 
   function handleReact(emoji: ReactionEmoji) {
