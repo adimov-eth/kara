@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import type { QueueState, SearchResult, RoomConfig, RoomMode } from '@karaoke/types';
+  import type { QueueState, SearchResult, RoomConfig, RoomMode, SocialConfig } from '@karaoke/types';
+  import { DEFAULT_SOCIAL_CONFIG } from '@karaoke/types';
   import {
     createWebSocket,
     getState,
@@ -16,6 +17,7 @@
     getRoomId,
     getRoomConfig,
     setRoomMode,
+    setRoomSocialConfig,
     join,
   } from '$lib';
   import { extractVideoId } from '@karaoke/domain';
@@ -33,6 +35,8 @@
   let room = $state<QueueState>({ queue: [], nowPlaying: null, currentEpoch: 0 });
   let roomConfig = $state<RoomConfig | null>(null);
   let isChangingMode = $state(false);
+  let socialConfig = $state<SocialConfig>({ ...DEFAULT_SOCIAL_CONFIG });
+  let isUpdatingSocial = $state(false);
 
   // Add form
   let addName = $state('');
@@ -75,6 +79,12 @@
   onDestroy(() => {
     ws.disconnect();
     if (pollInterval) clearInterval(pollInterval);
+  });
+
+  $effect(() => {
+    if (roomConfig) {
+      socialConfig = { ...DEFAULT_SOCIAL_CONFIG, ...(roomConfig.social ?? {}) };
+    }
   });
 
   async function checkRoomAdmin() {
@@ -334,6 +344,30 @@
     }
   }
 
+  async function updateSocialConfig(patch: Partial<SocialConfig>) {
+    if (!roomConfig || isUpdatingSocial) return;
+
+    const previous = socialConfig;
+    socialConfig = { ...socialConfig, ...patch };
+    isUpdatingSocial = true;
+
+    const result = await setRoomSocialConfig(patch);
+    isUpdatingSocial = false;
+
+    if (result.kind === 'updated') {
+      roomConfig = result.config;
+      socialConfig = { ...DEFAULT_SOCIAL_CONFIG, ...(result.config.social ?? {}) };
+    } else if (result.kind === 'unauthorized') {
+      toastStore.error('Session expired - please log in again');
+      handleLogout();
+      socialConfig = previous;
+    } else {
+      const errorMsg = result.kind === 'error' ? result.message : 'Failed to update social settings';
+      toastStore.error(errorMsg);
+      socialConfig = previous;
+    }
+  }
+
   function toggleHistory() {
     historyExpanded = !historyExpanded;
   }
@@ -443,6 +477,93 @@
         >
           {isChangingMode ? 'Switching...' : `Switch to ${roomConfig.mode === 'jukebox' ? 'Karaoke' : 'Jukebox'}`}
         </button>
+      </div>
+
+      <div class="social-card">
+        <div class="social-header">
+          <span class="section-title">Social Features</span>
+          <span class="social-subtitle">Audience reactions and chat</span>
+        </div>
+        <div class="social-controls">
+          <div class="toggle-row">
+            <span class="toggle-label">Reactions</span>
+            <button
+              class="toggle-btn"
+              class:active={socialConfig.reactionsEnabled}
+              onclick={() => updateSocialConfig({ reactionsEnabled: !socialConfig.reactionsEnabled })}
+              disabled={isUpdatingSocial}
+            >
+              {socialConfig.reactionsEnabled ? 'On' : 'Off'}
+            </button>
+          </div>
+          <div class="toggle-row">
+            <span class="toggle-label">Boo emoji</span>
+            <button
+              class="toggle-btn"
+              class:active={socialConfig.booEnabled}
+              onclick={() => updateSocialConfig({ booEnabled: !socialConfig.booEnabled })}
+              disabled={isUpdatingSocial || !socialConfig.reactionsEnabled}
+            >
+              {socialConfig.booEnabled ? 'On' : 'Off'}
+            </button>
+          </div>
+          <div class="toggle-row">
+            <span class="toggle-label">Chat</span>
+            <button
+              class="toggle-btn"
+              class:active={socialConfig.chatEnabled}
+              onclick={() => updateSocialConfig({ chatEnabled: !socialConfig.chatEnabled })}
+              disabled={isUpdatingSocial}
+            >
+              {socialConfig.chatEnabled ? 'On' : 'Off'}
+            </button>
+          </div>
+          <div class="toggle-row">
+            <span class="toggle-label">Energy skip</span>
+            <button
+              class="toggle-btn"
+              class:active={socialConfig.energySkipEnabled}
+              onclick={() => updateSocialConfig({ energySkipEnabled: !socialConfig.energySkipEnabled })}
+              disabled={isUpdatingSocial}
+            >
+              {socialConfig.energySkipEnabled ? 'On' : 'Off'}
+            </button>
+          </div>
+
+          <div class="slider-row">
+            <div class="slider-label">
+              Threshold
+              <span class="slider-hint">(10-40)</span>
+            </div>
+            <input
+              type="range"
+              min="10"
+              max="40"
+              value={socialConfig.energySkipThreshold}
+              onchange={(e) =>
+                updateSocialConfig({ energySkipThreshold: Number((e.target as HTMLInputElement).value) })}
+              disabled={isUpdatingSocial || !socialConfig.energySkipEnabled}
+            />
+            <span class="slider-value">{socialConfig.energySkipThreshold}</span>
+          </div>
+
+          <div class="slider-row">
+            <div class="slider-label">
+              Duration
+              <span class="slider-hint">(5-30s)</span>
+            </div>
+            <input
+              type="range"
+              min="5"
+              max="30"
+              value={socialConfig.energySkipDuration}
+              onchange={(e) =>
+                updateSocialConfig({ energySkipDuration: Number((e.target as HTMLInputElement).value) })}
+              disabled={isUpdatingSocial || !socialConfig.energySkipEnabled}
+            />
+            <span class="slider-value">{socialConfig.energySkipDuration}s</span>
+          </div>
+        </div>
       </div>
     {/if}
 
@@ -712,6 +833,97 @@
     padding: 16px 20px;
     margin-bottom: 24px;
     border: 1px solid rgba(255, 255, 255, 0.05);
+  }
+
+  .social-card {
+    background: var(--bg-card);
+    border-radius: 16px;
+    padding: 18px 20px;
+    margin-bottom: 24px;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+  }
+
+  .social-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 16px;
+  }
+
+  .social-subtitle {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+  }
+
+  .social-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .toggle-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .toggle-label {
+    font-size: 0.9rem;
+    color: var(--text);
+  }
+
+  .toggle-btn {
+    min-width: 72px;
+    padding: 6px 12px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: all 0.2s ease;
+  }
+
+  .toggle-btn.active {
+    background: rgba(78, 205, 196, 0.2);
+    border-color: rgba(78, 205, 196, 0.4);
+    color: var(--cyan);
+  }
+
+  .toggle-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .slider-row {
+    display: grid;
+    grid-template-columns: minmax(120px, 1fr) 1fr auto;
+    gap: 12px;
+    align-items: center;
+  }
+
+  .slider-row input[type="range"] {
+    width: 100%;
+  }
+
+  .slider-label {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+  }
+
+  .slider-hint {
+    margin-left: 6px;
+    font-size: 0.7rem;
+    color: rgba(255, 255, 255, 0.35);
+  }
+
+  .slider-value {
+    font-size: 0.85rem;
+    color: var(--text);
+    padding-left: 8px;
+    min-width: 48px;
+    text-align: right;
   }
 
   .mode-info {

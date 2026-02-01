@@ -109,6 +109,59 @@ export interface PlaybackState {
   playing: boolean
 }
 
+// =============================================================================
+// Social Features (Reactions, Chat, Energy)
+// =============================================================================
+
+export type ReactionEmoji = 'fire' | 'heart' | 'clap' | 'laugh' | 'boo'
+
+export interface Reaction {
+  id: string
+  emoji: ReactionEmoji
+  userId: string
+  displayName: string
+  timestamp: number
+}
+
+export const REACTION_WEIGHT: Record<ReactionEmoji, number> = {
+  fire: 1,
+  heart: 1,
+  clap: 1,
+  laugh: 0.5,
+  boo: -2,
+}
+
+export interface ChatMessage {
+  id: string
+  userId: string
+  displayName: string
+  text: string           // max 200 chars
+  timestamp: number
+}
+
+export interface EnergyState {
+  level: number          // 0-100, 50 = neutral
+  trend: 'rising' | 'falling' | 'stable'
+}
+
+export interface SocialConfig {
+  reactionsEnabled: boolean    // default: true
+  chatEnabled: boolean         // default: true
+  booEnabled: boolean          // default: false
+  energySkipEnabled: boolean   // default: false
+  energySkipThreshold: number  // default: 20
+  energySkipDuration: number   // seconds below threshold, default: 15
+}
+
+export const DEFAULT_SOCIAL_CONFIG: SocialConfig = {
+  reactionsEnabled: true,
+  chatEnabled: true,
+  booEnabled: false,
+  energySkipEnabled: false,
+  energySkipThreshold: 20,
+  energySkipDuration: 15,
+}
+
 // Legacy types (kept for storage migration in worker)
 export interface LegacyEntry {
   id: string
@@ -197,6 +250,7 @@ export interface RoomConfig {
   mode: RoomMode          // 'jukebox' (new default) or 'karaoke' (legacy)
   requireAuth: boolean    // false allows anonymous users
   maxStackSize: number    // max songs in personal stack (default: 10)
+  social?: SocialConfig   // social features config (optional for backwards compatibility)
 }
 
 export interface RoomAdmin {
@@ -450,6 +504,13 @@ export type ServerMessage =
   // Jukebox mode additions
   | { kind: 'stackUpdated'; userId: string; stack: StackedSong[] }
   | { kind: 'promotedToQueue'; userId: string; entry: Entry; remainingStack: StackedSong[] }
+  // Social features
+  | { kind: 'reaction'; reaction: Reaction }
+  | { kind: 'chat'; message: ChatMessage }
+  | { kind: 'chatPinned'; message: ChatMessage }
+  | { kind: 'chatUnpinned'; messageId: string }
+  | { kind: 'energy'; state: EnergyState }
+  | { kind: 'energySkip' }
 
 // Client -> Server messages
 export type ClientMessage =
@@ -469,6 +530,10 @@ export type ClientMessage =
   | { kind: 'addSong'; videoId: string; title: string; sessionToken: string }
   | { kind: 'removeFromStack'; songId: string; sessionToken: string }
   | { kind: 'reorderStack'; songIds: string[]; sessionToken: string }
+  // Social features
+  | { kind: 'reaction'; emoji: ReactionEmoji }
+  | { kind: 'chat'; text: string }
+  | { kind: 'pinChat'; messageId: string }
 
 // =============================================================================
 // Feedback Types

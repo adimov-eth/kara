@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import type { QueueState, Entry, PlaybackState, SearchResult } from '@karaoke/types';
+  import type { QueueState, Entry, PlaybackState, SearchResult, Reaction, ChatMessage, EnergyState } from '@karaoke/types';
   import {
     createWebSocket,
     getState,
@@ -19,6 +19,9 @@
   import { extractVideoId } from '@karaoke/domain';
   import { toastStore } from '$lib/stores/toast.svelte';
   import Toast from './Toast.svelte';
+  import EnergyMeter from './EnergyMeter.svelte';
+  import ReactionOverlay from './ReactionOverlay.svelte';
+  import PinnedMessage from './PinnedMessage.svelte';
 
   const PAUSE_DURATION = 7000;
   const SYNC_DRIFT_THRESHOLD_MS = 200; // Re-sync if drift exceeds 200ms
@@ -54,6 +57,19 @@
   let syncCheckInterval: ReturnType<typeof setInterval> | null = null;
   let lastSyncPlayback: PlaybackState | null = null;
 
+  // Social features
+  type FloatingReaction = {
+    id: string;
+    emoji: Reaction['emoji'];
+    displayName: string;
+    lane: number;
+  };
+
+  let energyState = $state<EnergyState | null>(null);
+  let floatingReactions = $state<FloatingReaction[]>([]);
+  let pinnedMessage = $state<ChatMessage | null>(null);
+  let reactionLane = 0;
+
   // Controls panel state
   let showControls = $state(true);
   let isAdminMode = $state(false);
@@ -71,7 +87,17 @@
 
   // Derived
   const upNext = $derived(room.queue.slice(0, 5));
-  const qrUrl = $derived(`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(`https://karaoke-queue.boris-47d.workers.dev/${roomId}`)}&bgcolor=0a0a0f&color=ffffff`);
+  const qrUrl = $derived(
+    typeof window === 'undefined'
+      ? ''
+      : (() => {
+          const baseUrl = window.location.origin;
+          const normalizedRoomId = roomId === 'default' ? '' : roomId;
+          const roomPath = normalizedRoomId ? `/${normalizedRoomId}` : '';
+          const targetUrl = `${baseUrl}${roomPath}`;
+          return `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(targetUrl)}&bgcolor=0a0a0f&color=ffffff`;
+        })()
+  );
 
   onMount(() => {
     roomId = getRoomId();
@@ -101,6 +127,39 @@
     // Handle sync messages for multi-device synchronization
     ws.onSync((playback, serverTimeOffset) => {
       handleSync(playback, serverTimeOffset);
+    });
+
+    ws.onReaction((reaction) => {
+      const lane = reactionLane % 3;
+      reactionLane += 1;
+      const item: FloatingReaction = {
+        id: reaction.id,
+        emoji: reaction.emoji,
+        displayName: reaction.displayName,
+        lane,
+      };
+      floatingReactions = [...floatingReactions, item];
+      setTimeout(() => {
+        floatingReactions = floatingReactions.filter((r) => r.id !== reaction.id);
+      }, 3000);
+    });
+
+    ws.onEnergy((state) => {
+      energyState = state;
+    });
+
+    ws.onChatPinned((message) => {
+      pinnedMessage = message;
+    });
+
+    ws.onChatUnpinned((messageId) => {
+      if (pinnedMessage?.id === messageId) {
+        pinnedMessage = null;
+      }
+    });
+
+    ws.onEnergySkip(() => {
+      toastStore.info('Energy dipped - skipping');
     });
 
     ws.connect('player');
@@ -581,6 +640,13 @@
   <div class="connection-status {connectionStatus.class}">
     {connectionStatus.text}
   </div>
+
+  {#if energyState}
+    <EnergyMeter energyState={energyState} />
+  {/if}
+
+  <ReactionOverlay items={floatingReactions} />
+  <PinnedMessage message={pinnedMessage} />
 
   <!-- YouTube Player (hidden during pause/idle) -->
   <div class="video-wrapper" class:hidden={playerMode !== 'playing_song'}>

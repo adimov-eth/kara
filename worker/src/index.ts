@@ -78,9 +78,28 @@ const corsHeaders: Record<string, string> = {
   'Access-Control-Allow-Headers': 'Content-Type, X-Voter-Id, X-Admin, X-User-Name, Authorization, Upgrade, Connection',
 }
 
+const securityHeaders: Record<string, string> = {
+  'Strict-Transport-Security': 'max-age=31536000; includeSubDomains; preload',
+}
+
+function addSecurityHeaders(response: Response): Response {
+  const newHeaders = new Headers(response.headers)
+  for (const [key, value] of Object.entries(securityHeaders)) {
+    newHeaders.set(key, value)
+  }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: newHeaders,
+  })
+}
+
 function addCorsHeaders(response: Response): Response {
   const newHeaders = new Headers(response.headers)
   for (const [key, value] of Object.entries(corsHeaders)) {
+    newHeaders.set(key, value)
+  }
+  for (const [key, value] of Object.entries(securityHeaders)) {
     newHeaders.set(key, value)
   }
   return new Response(response.body, {
@@ -229,6 +248,13 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url)
     const path = url.pathname
+    const forwardedProto = request.headers.get('X-Forwarded-Proto')
+
+    if (forwardedProto === 'http' || url.protocol === 'http:') {
+      const httpsUrl = new URL(request.url)
+      httpsUrl.protocol = 'https:'
+      return addSecurityHeaders(Response.redirect(httpsUrl.toString(), 308))
+    }
 
     // Handle CORS preflight
     if (request.method === 'OPTIONS') {
@@ -336,15 +362,15 @@ export default {
 
     // Legacy view routes (for backwards compatibility with default room)
     if (path === '/player') {
-      return new Response(PLAYER_HTML, {
+      return addSecurityHeaders(new Response(PLAYER_HTML, {
         headers: { 'Content-Type': 'text/html; charset=utf-8' },
-      })
+      }))
     }
 
     if (path === ADMIN_PATH) {
-      return new Response(ADMIN_HTML, {
+      return addSecurityHeaders(new Response(ADMIN_HTML, {
         headers: { 'Content-Type': 'text/html; charset=utf-8' },
-      })
+      }))
     }
 
     // Room-scoped routes: /{roomId}, /{roomId}/player, /{roomId}/admin
@@ -357,31 +383,31 @@ export default {
         const subPath = '/' + segments.slice(1).join('/')
 
         if (subPath === '/') {
-          return new Response(GUEST_HTML, {
+          return addSecurityHeaders(new Response(GUEST_HTML, {
             headers: { 'Content-Type': 'text/html; charset=utf-8' },
-          })
+          }))
         }
         if (subPath === '/player') {
-          return new Response(PLAYER_HTML, {
+          return addSecurityHeaders(new Response(PLAYER_HTML, {
             headers: { 'Content-Type': 'text/html; charset=utf-8' },
-          })
+          }))
         }
         if (subPath === ADMIN_PATH) {
-          return new Response(ADMIN_HTML, {
+          return addSecurityHeaders(new Response(ADMIN_HTML, {
             headers: { 'Content-Type': 'text/html; charset=utf-8' },
-          })
+          }))
         }
       }
     }
 
     // Root path: landing page for room entry
     if (path === '/') {
-      return new Response(LANDING_HTML, {
+      return addSecurityHeaders(new Response(LANDING_HTML, {
         headers: { 'Content-Type': 'text/html; charset=utf-8' },
-      })
+      }))
     }
 
     // 404 for unrecognized paths
-    return new Response('Not found', { status: 404 })
+    return addSecurityHeaders(new Response('Not found', { status: 404 }))
   },
 }

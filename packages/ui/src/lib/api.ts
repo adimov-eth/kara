@@ -15,6 +15,7 @@ import type {
   SetConfigResult,
   RoomConfig,
   RoomMode,
+  SocialConfig,
   FeedbackRequest,
   FeedbackResult,
   GetSessionResult,
@@ -49,6 +50,7 @@ export type {
   SetConfigResult,
   RoomConfig,
   RoomMode,
+  SocialConfig,
   FeedbackResult,
   GetSessionResult,
   AnonymousSessionResult,
@@ -358,6 +360,13 @@ export const setRoomMode = (mode: RoomMode): Promise<SetConfigResult> =>
     method: 'POST',
     headers: getAdminAuthHeaders(),
     body: { mode },
+  });
+
+export const setRoomSocialConfig = (social: Partial<SocialConfig>): Promise<SetConfigResult> =>
+  api('/room/config', {
+    method: 'POST',
+    headers: getAdminAuthHeaders(),
+    body: { social },
   });
 
 // =============================================================================

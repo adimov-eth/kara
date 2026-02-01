@@ -1,6 +1,16 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
-  import type { SearchResult, QueueState, Entry, UserSession, User, RoomConfig } from "@karaoke/types";
+  import type {
+    SearchResult,
+    QueueState,
+    Entry,
+    UserSession,
+    User,
+    RoomConfig,
+    ChatMessage,
+    ReactionEmoji,
+  } from "@karaoke/types";
+  import { DEFAULT_SOCIAL_CONFIG } from "@karaoke/types";
   import {
     createWebSocket,
     join,
@@ -10,6 +20,7 @@
     getRoomId,
     addSong,
     getRoomConfig,
+    createAnonymousSession,
   } from "$lib";
   import { extractVideoId } from "@karaoke/domain";
   import { safeJsonParse } from "$lib/utils";
@@ -23,6 +34,8 @@
   import HelpButton from "$lib/components/HelpButton.svelte";
   import LoginButton from "$lib/components/LoginButton.svelte";
   import MyStack from "$lib/components/MyStack.svelte";
+  import ReactionPanel from "$lib/components/ReactionPanel.svelte";
+  import ChatPanel from "$lib/components/ChatPanel.svelte";
 
   // State
   let room = $state<QueueState>({
@@ -39,9 +52,11 @@
   let session = $state<UserSession | null>(null);
   let user = $state<User | null>(null);
   let myStackRef = $state<MyStack | null>(null);
+  let loginKey = $state(0);
 
   // Room config (for mode display)
   let roomConfig = $state<RoomConfig | null>(null);
+  let chatMessages = $state<ChatMessage[]>([]);
 
   // Form state
   let selectedSong = $state<SearchResult | null>(null);
@@ -92,12 +107,15 @@
   const isLoggedIn = $derived(!!session);
   const displayName = $derived(session?.displayName ?? myName);
   const roomMode = $derived(roomConfig?.mode ?? 'karaoke');
+  const socialConfig = $derived(roomConfig?.social ?? DEFAULT_SOCIAL_CONFIG);
+  const reactionsEnabled = $derived(socialConfig.reactionsEnabled);
+  const booEnabled = $derived(socialConfig.booEnabled);
+  const chatEnabled = $derived(socialConfig.chatEnabled);
   const canJoin = $derived(
     validatedUrl && (
-      // Jukebox mode: just need to be logged in
-      (roomMode === 'jukebox' && isLoggedIn) ||
-      // Karaoke mode: need name
-      (roomMode === 'karaoke' && myName.trim().length > 0)
+      roomMode === 'jukebox'
+        ? (isLoggedIn || myName.trim().length > 0)
+        : myName.trim().length > 0
     ),
   );
 
@@ -114,6 +132,9 @@
 
     // Connect WebSocket
     ws.onState(handleStateUpdate);
+    ws.onChat((message) => {
+      chatMessages = [...chatMessages, message].slice(-100);
+    });
     ws.connect("user");
 
     // Load YouTube API
@@ -346,8 +367,23 @@
     isJoining = true;
     joinError = null;
 
-    // Jukebox mode with auth: use stack/add API
-    if (roomMode === 'jukebox' && isLoggedIn) {
+    // Jukebox mode: use stack/add API (requires auth)
+    if (roomMode === 'jukebox') {
+      if (!isLoggedIn) {
+        if (!myName.trim()) {
+          joinError = "Enter your name to continue";
+          isJoining = false;
+          return;
+        }
+        const anonResult = await createAnonymousSession(myName.trim());
+        if (anonResult.kind !== "created") {
+          joinError = anonResult.kind === "error" ? anonResult.message : "Could not create session";
+          isJoining = false;
+          return;
+        }
+        handleSessionChange(anonResult.session, null);
+        loginKey += 1;
+      }
       const result = await addSong(videoId, validatedTitle);
       isJoining = false;
 
@@ -544,13 +580,27 @@
       myName = newSession.displayName;
     }
   }
+
+  function handleReact(emoji: ReactionEmoji) {
+    ws.send({ kind: "reaction", emoji });
+  }
+
+  function handleChatSend(text: string) {
+    ws.send({ kind: "chat", text });
+  }
+
+  function handlePinChat(messageId: string) {
+    ws.send({ kind: "pinChat", messageId });
+  }
 </script>
 
 <div class="container">
   <header>
     <div class="header-top">
       <h1>Karaoke</h1>
-      <LoginButton onSessionChange={handleSessionChange} />
+      {#key loginKey}
+        <LoginButton onSessionChange={handleSessionChange} />
+      {/key}
     </div>
     <p class="subtitle">Pick a song, join the queue, sing your heart out</p>
     <div class="header-actions">
@@ -617,9 +667,11 @@
   {/if}
 
   <div class="join-card">
-    {#if roomMode === 'karaoke'}
+    {#if roomMode === 'karaoke' || (roomMode === 'jukebox' && !isLoggedIn)}
       <div class="input-group">
-        <label class="input-label" for="nameInput">Your name</label>
+        <label class="input-label" for="nameInput">
+          {roomMode === 'jukebox' ? 'Your name (needed for stack)' : 'Your name'}
+        </label>
         <input
           type="text"
           id="nameInput"
@@ -668,6 +720,13 @@
     {/if}
   </div>
 
+  <ChatPanel
+    enabled={chatEnabled}
+    messages={chatMessages}
+    onSend={handleChatSend}
+    onPin={handlePinChat}
+  />
+
   <Queue
     entries={room.queue}
     {myName}
@@ -684,6 +743,12 @@
 </div>
 
 <div id="validationPlayer" style="display: none;"></div>
+
+<ReactionPanel
+  enabled={reactionsEnabled}
+  booEnabled={booEnabled}
+  onReact={handleReact}
+/>
 
 <PinModal
   mode={pinMode}
@@ -711,6 +776,10 @@
   header {
     text-align: center;
     margin-bottom: 32px;
+  }
+
+  .container {
+    padding-bottom: 140px;
   }
 
   .header-top {

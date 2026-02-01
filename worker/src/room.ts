@@ -8,6 +8,7 @@ import {
   type VoteRecord,
   type ServerMessage,
   type ClientMessage,
+  type ClientType,
   type Performance,
   type PerformanceOutcome,
   type Identity,
@@ -31,6 +32,12 @@ import {
   type SetConfigResult,
   type SearchResult,
   type PlaybackState,
+  type Reaction,
+  type ChatMessage,
+  type EnergyState,
+  type SocialConfig,
+  DEFAULT_SOCIAL_CONFIG,
+  REACTION_WEIGHT,
   type StackedSong,
   type AddToStackResult,
   type RemoveFromStackResult,
@@ -87,6 +94,18 @@ const DEFAULT_MAX_STACK_SIZE = 10
 const ADMIN_SESSION_DURATION_MS = 4 * 60 * 60 * 1000 // 4 hours
 const PIN_RATE_LIMIT_WINDOW_MS = 60 * 1000 // 1 minute
 const PIN_RATE_LIMIT_MAX_ATTEMPTS = 5
+const DEFAULT_RATE_LIMIT_WINDOW_MS = 60 * 1000 // 1 minute
+
+// Social rate limits
+const REACTION_RATE_LIMIT = 10
+const REACTION_RATE_LIMIT_WINDOW_MS = 5 * 1000
+const CHAT_RATE_LIMIT = 5
+const CHAT_RATE_LIMIT_WINDOW_MS = 10 * 1000
+const PIN_CHAT_RATE_LIMIT = 2
+const PIN_CHAT_RATE_LIMIT_WINDOW_MS = 30 * 1000
+
+const REACTION_WINDOW_MS = 30 * 1000
+const PINNED_MESSAGE_TTL_MS = 8000
 
 // Rate limits per minute
 const SEARCH_RATE_LIMIT = 20
@@ -98,13 +117,21 @@ interface RateLimitEntry {
   windowStart: number
 }
 
-type RateLimitType = 'pin' | 'search' | 'join' | 'vote'
+interface RateLimitConfig {
+  max: number
+  windowMs: number
+}
 
-const RATE_LIMITS: Record<RateLimitType, number> = {
-  pin: PIN_RATE_LIMIT_MAX_ATTEMPTS,
-  search: SEARCH_RATE_LIMIT,
-  join: JOIN_RATE_LIMIT,
-  vote: VOTE_RATE_LIMIT,
+type RateLimitType = 'pin' | 'search' | 'join' | 'vote' | 'reaction' | 'chat' | 'pinChat'
+
+const RATE_LIMITS: Record<RateLimitType, RateLimitConfig> = {
+  pin: { max: PIN_RATE_LIMIT_MAX_ATTEMPTS, windowMs: PIN_RATE_LIMIT_WINDOW_MS },
+  search: { max: SEARCH_RATE_LIMIT, windowMs: DEFAULT_RATE_LIMIT_WINDOW_MS },
+  join: { max: JOIN_RATE_LIMIT, windowMs: DEFAULT_RATE_LIMIT_WINDOW_MS },
+  vote: { max: VOTE_RATE_LIMIT, windowMs: DEFAULT_RATE_LIMIT_WINDOW_MS },
+  reaction: { max: REACTION_RATE_LIMIT, windowMs: REACTION_RATE_LIMIT_WINDOW_MS },
+  chat: { max: CHAT_RATE_LIMIT, windowMs: CHAT_RATE_LIMIT_WINDOW_MS },
+  pinChat: { max: PIN_CHAT_RATE_LIMIT, windowMs: PIN_CHAT_RATE_LIMIT_WINDOW_MS },
 }
 
 // Search cache settings
@@ -133,6 +160,9 @@ export class RoomDO implements DurableObject {
   private searchCache: Map<string, SearchCacheEntry> = new Map()
   // Track extension WebSockets separately (tags can't be updated after acceptWebSocket)
   private extensionSockets: Set<WebSocket> = new Set()
+  // Track client types and identities for WebSockets
+  private socketClients: Map<WebSocket, ClientType> = new Map()
+  private socketIdentities: Map<WebSocket, { userId: string; displayName: string }> = new Map()
   // Playback sync state (in-memory) - tracks when current song started for multi-device sync
   private playbackState: PlaybackState = {
     videoId: null,
@@ -140,6 +170,14 @@ export class RoomDO implements DurableObject {
     position: 0,
     playing: false,
   }
+  // Social features (in-memory, not persisted)
+  private recentReactions: Reaction[] = []
+  private chatMessages: ChatMessage[] = []
+  private pinnedMessage: ChatMessage | null = null
+  private pinnedMessageAt: number | null = null
+  private pinnedMessageTimeout: ReturnType<typeof setTimeout> | null = null
+  private energyBelowThresholdSince: number | null = null
+  private lastEnergyLevel: number | null = null
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state
@@ -298,12 +336,38 @@ export class RoomDO implements DurableObject {
     if (this.roomConfig === null) {
       this.roomConfig = await this.state.storage.get<RoomConfig>(CONFIG_KEY) ?? null
     }
+    if (this.roomConfig) {
+      const merged = this.mergeSocialConfig(this.roomConfig)
+      if (!this.roomConfig.social || !this.isSocialConfigEqual(this.roomConfig.social, merged)) {
+        this.roomConfig = { ...this.roomConfig, social: merged }
+        await this.state.storage.put(CONFIG_KEY, this.roomConfig)
+      }
+    }
     return this.roomConfig
   }
 
   private async saveRoomConfig(config: RoomConfig): Promise<void> {
     this.roomConfig = config
     await this.state.storage.put(CONFIG_KEY, config)
+  }
+
+  private mergeSocialConfig(config: RoomConfig): SocialConfig {
+    return { ...DEFAULT_SOCIAL_CONFIG, ...(config.social ?? {}) }
+  }
+
+  private isSocialConfigEqual(a: SocialConfig, b: SocialConfig): boolean {
+    return a.reactionsEnabled === b.reactionsEnabled
+      && a.chatEnabled === b.chatEnabled
+      && a.booEnabled === b.booEnabled
+      && a.energySkipEnabled === b.energySkipEnabled
+      && a.energySkipThreshold === b.energySkipThreshold
+      && a.energySkipDuration === b.energySkipDuration
+  }
+
+  private async getSocialConfig(): Promise<SocialConfig> {
+    const config = await this.getRoomConfig()
+    if (!config) return { ...DEFAULT_SOCIAL_CONFIG }
+    return this.mergeSocialConfig(config)
   }
 
   private async getRoomAdmin(): Promise<RoomAdmin | null> {
@@ -383,13 +447,13 @@ export class RoomDO implements DurableObject {
     const entry = this.rateLimits.get(key)
     const limit = RATE_LIMITS[type]
 
-    if (!entry || now - entry.windowStart > PIN_RATE_LIMIT_WINDOW_MS) {
+    if (!entry || now - entry.windowStart > limit.windowMs) {
       // New window
       this.rateLimits.set(key, { attempts: 1, windowStart: now })
       return false
     }
 
-    if (entry.attempts >= limit) {
+    if (entry.attempts >= limit.max) {
       return true // Blocked
     }
 
@@ -411,6 +475,19 @@ export class RoomDO implements DurableObject {
     return request.headers.get('CF-Connecting-IP') ||
            request.headers.get('X-Forwarded-For')?.split(',')[0]?.trim() ||
            'unknown'
+  }
+
+  private async getIdentityFromRequest(request: Request): Promise<{ userId: string; displayName: string } | null> {
+    if (!this.env) return null
+    const token = getSessionCookie(request)
+    if (!token) return null
+    const payload = await verifySession(token, this.env.SESSION_SECRET)
+    if (!payload) return null
+    return { userId: payload.sub, displayName: payload.dn }
+  }
+
+  private getSocketIdentity(ws: WebSocket): { userId: string; displayName: string } | null {
+    return this.socketIdentities.get(ws) ?? null
   }
 
   /**
@@ -466,6 +543,25 @@ export class RoomDO implements DurableObject {
     }
   }
 
+  private broadcastToClientTypes(
+    clientTypes: ClientType[],
+    message: ServerMessage,
+    exclude?: WebSocket
+  ): void {
+    const data = JSON.stringify(message)
+    const allowed = new Set(clientTypes)
+    for (const ws of this.getConnections()) {
+      if (ws === exclude || ws.readyState !== WebSocket.OPEN) continue
+      const clientType = this.socketClients.get(ws) ?? 'user'
+      if (!allowed.has(clientType)) continue
+      try {
+        ws.send(data)
+      } catch {
+        // Ignore send errors
+      }
+    }
+  }
+
   private send(ws: WebSocket, message: ServerMessage): void {
     if (ws.readyState === WebSocket.OPEN) {
       try {
@@ -511,12 +607,120 @@ export class RoomDO implements DurableObject {
     this.broadcastSync()
   }
 
+  // =========================================================================
+  // Social Features (Reactions, Chat, Energy)
+  // =========================================================================
+
+  private pruneOldReactions(now: number = Date.now()): void {
+    const cutoff = now - REACTION_WINDOW_MS
+    this.recentReactions = this.recentReactions.filter((reaction) => reaction.timestamp >= cutoff)
+  }
+
+  private getEnergyTrend(level: number): EnergyState['trend'] {
+    if (this.lastEnergyLevel === null) {
+      this.lastEnergyLevel = level
+      return 'stable'
+    }
+
+    const diff = level - this.lastEnergyLevel
+    this.lastEnergyLevel = level
+
+    if (Math.abs(diff) < 2) return 'stable'
+    return diff > 0 ? 'rising' : 'falling'
+  }
+
+  private calculateEnergy(now: number = Date.now()): EnergyState {
+    this.pruneOldReactions(now)
+
+    const weighted = this.recentReactions.reduce(
+      (sum, reaction) => sum + (REACTION_WEIGHT[reaction.emoji] ?? 0),
+      0
+    )
+
+    const level = Math.max(0, Math.min(100, 50 + weighted * 2))
+    const roundedLevel = Math.round(level)
+
+    return {
+      level: roundedLevel,
+      trend: this.getEnergyTrend(roundedLevel),
+    }
+  }
+
+  private broadcastEnergy(): EnergyState {
+    const state = this.calculateEnergy()
+    this.broadcastToClientTypes(['player'], { kind: 'energy', state })
+    return state
+  }
+
+  private async checkEnergySkip(energyState: EnergyState): Promise<void> {
+    const config = await this.getSocialConfig()
+    if (!config.energySkipEnabled) {
+      this.energyBelowThresholdSince = null
+      return
+    }
+
+    const state = await this.getQueueState()
+    if (!state.nowPlaying) {
+      this.energyBelowThresholdSince = null
+      return
+    }
+
+    if (energyState.level >= config.energySkipThreshold) {
+      this.energyBelowThresholdSince = null
+      return
+    }
+
+    const now = Date.now()
+    if (!this.energyBelowThresholdSince) {
+      this.energyBelowThresholdSince = now
+      return
+    }
+
+    if (now - this.energyBelowThresholdSince >= config.energySkipDuration * 1000) {
+      this.energyBelowThresholdSince = null
+      this.broadcastToClientTypes(['player'], { kind: 'energySkip' })
+      await this.doAdvanceQueue(state, { kind: 'skipped', by: 'admin' })
+    }
+  }
+
+  private clearPinnedMessage(messageId: string): void {
+    if (!this.pinnedMessage) return
+    this.pinnedMessage = null
+    this.pinnedMessageAt = null
+    if (this.pinnedMessageTimeout) {
+      clearTimeout(this.pinnedMessageTimeout)
+      this.pinnedMessageTimeout = null
+    }
+    this.broadcastToClientTypes(['player'], { kind: 'chatUnpinned', messageId })
+  }
+
+  private schedulePinnedMessageClear(messageId: string): void {
+    if (this.pinnedMessageTimeout) {
+      clearTimeout(this.pinnedMessageTimeout)
+    }
+    this.pinnedMessageTimeout = setTimeout(() => {
+      if (this.pinnedMessage?.id === messageId) {
+        this.clearPinnedMessage(messageId)
+      }
+    }, PINNED_MESSAGE_TTL_MS)
+  }
+
+  private sendPinnedMessageIfActive(ws: WebSocket): void {
+    if (!this.pinnedMessage || !this.pinnedMessageAt) return
+    const age = Date.now() - this.pinnedMessageAt
+    if (age > PINNED_MESSAGE_TTL_MS) {
+      this.clearPinnedMessage(this.pinnedMessage.id)
+      return
+    }
+    this.send(ws, { kind: 'chatPinned', message: this.pinnedMessage })
+  }
+
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url)
 
     // WebSocket upgrade
     if (request.headers.get('Upgrade') === 'websocket') {
-      return this.handleWebSocket(request)
+      return await this.handleWebSocket(request)
     }
 
     // HTTP API fallback (for compatibility)
@@ -611,12 +815,17 @@ export class RoomDO implements DurableObject {
     }
   }
 
-  private handleWebSocket(_request: Request): Response {
+  private async handleWebSocket(request: Request): Promise<Response> {
     const pair = new WebSocketPair()
     const [client, server] = [pair[0], pair[1]]
 
     // Accept with default tag (will be updated on subscribe)
     this.state.acceptWebSocket(server, ['type:user'])
+
+    const identity = await this.getIdentityFromRequest(request)
+    if (identity) {
+      this.socketIdentities.set(server, identity)
+    }
 
     return new Response(null, { status: 101, webSocket: client })
   }
@@ -636,6 +845,8 @@ export class RoomDO implements DurableObject {
     // Check if this was an extension
     const wasExtension = this.extensionSockets.has(ws)
     this.extensionSockets.delete(ws)
+    this.socketClients.delete(ws)
+    this.socketIdentities.delete(ws)
 
     // WebSocket is automatically removed from state.getWebSockets()
     // Notify clients if no extensions remain connected
@@ -655,6 +866,7 @@ export class RoomDO implements DurableObject {
         if (msg.clientType === 'extension') {
           this.extensionSockets.add(ws)
         }
+        this.socketClients.set(ws, msg.clientType)
 
         const state = await this.getQueueState()
         this.send(ws, {
@@ -662,6 +874,11 @@ export class RoomDO implements DurableObject {
           state,
           extensionConnected: this.hasExtensionConnected(),
         })
+
+        if (msg.clientType === 'player') {
+          this.send(ws, { kind: 'energy', state: this.calculateEnergy() })
+          this.sendPinnedMessageIfActive(ws)
+        }
 
         // If extension just connected, notify all other clients
         if (msg.clientType === 'extension') {
@@ -679,6 +896,100 @@ export class RoomDO implements DurableObject {
       case 'syncRequest': {
         // Client requesting current playback state for sync
         this.send(ws, { kind: 'sync', playback: this.playbackState })
+        break
+      }
+
+      // =====================================================================
+      // Social Features
+      // =====================================================================
+
+      case 'reaction': {
+        const config = await this.getSocialConfig()
+        if (!config.reactionsEnabled) return
+        if (msg.emoji === 'boo' && !config.booEnabled) return
+
+        const identity = this.getSocketIdentity(ws)
+        if (!identity) {
+          this.send(ws, { kind: 'error', message: 'Sign in to send reactions' })
+          return
+        }
+
+        if (this.checkRateLimit('reaction', identity.userId)) return
+
+        const reaction: Reaction = {
+          id: generateId(),
+          emoji: msg.emoji,
+          userId: identity.userId,
+          displayName: identity.displayName,
+          timestamp: Date.now(),
+        }
+
+        this.recentReactions.push(reaction)
+        this.pruneOldReactions()
+
+        const energyState = this.broadcastEnergy()
+        this.broadcastToClientTypes(['player'], { kind: 'reaction', reaction })
+        await this.checkEnergySkip(energyState)
+        break
+      }
+
+      case 'chat': {
+        const config = await this.getSocialConfig()
+        if (!config.chatEnabled) return
+
+        const identity = this.getSocketIdentity(ws)
+        if (!identity) {
+          this.send(ws, { kind: 'error', message: 'Sign in to chat' })
+          return
+        }
+
+        if (this.checkRateLimit('chat', identity.userId)) return
+
+        const text = msg.text.trim().slice(0, 200)
+        if (!text) return
+
+        const message: ChatMessage = {
+          id: generateId(),
+          userId: identity.userId,
+          displayName: identity.displayName,
+          text,
+          timestamp: Date.now(),
+        }
+
+        this.chatMessages.push(message)
+        if (this.chatMessages.length > 100) {
+          this.chatMessages.shift()
+        }
+
+        this.broadcastToClientTypes(['user', 'admin'], { kind: 'chat', message })
+        break
+      }
+
+      case 'pinChat': {
+        const config = await this.getSocialConfig()
+        if (!config.chatEnabled) return
+
+        const message = this.chatMessages.find((entry) => entry.id === msg.messageId)
+        if (!message) return
+
+        const clientType = this.socketClients.get(ws) ?? 'user'
+        if (clientType !== 'admin') {
+          const identity = this.getSocketIdentity(ws)
+          if (!identity) {
+            this.send(ws, { kind: 'error', message: 'Sign in to pin messages' })
+            return
+          }
+          if (this.checkRateLimit('pinChat', identity.userId)) return
+        }
+
+        if (this.pinnedMessage && this.pinnedMessage.id !== message.id) {
+          this.clearPinnedMessage(this.pinnedMessage.id)
+        }
+
+        this.pinnedMessage = message
+        this.pinnedMessageAt = Date.now()
+        this.broadcastToClientTypes(['player'], { kind: 'chatPinned', message })
+        this.schedulePinnedMessageClear(message.id)
         break
       }
 
@@ -1672,6 +1983,7 @@ export class RoomDO implements DurableObject {
       mode: 'jukebox',                    // New default mode
       requireAuth: false,                  // Allow anonymous users
       maxStackSize: DEFAULT_MAX_STACK_SIZE,
+      social: { ...DEFAULT_SOCIAL_CONFIG },
     }
 
     // Create admin
@@ -1712,27 +2024,44 @@ export class RoomDO implements DurableObject {
       return Response.json(result, { status: 404 })
     }
 
-    const body = (await request.json()) as { mode?: RoomMode }
-    const { mode } = body
+    const body = (await request.json()) as { mode?: RoomMode; social?: Partial<SocialConfig> }
+    const { mode, social } = body
+
+    const previousMode = config.mode
+    let modeChanged = false
+    let socialChanged = false
 
     if (mode && mode !== config.mode) {
-      const oldMode = config.mode
       config.mode = mode
+      modeChanged = true
+    }
+
+    if (social) {
+      const merged = { ...DEFAULT_SOCIAL_CONFIG, ...(config.social ?? {}), ...social }
+      if (!config.social || !this.isSocialConfigEqual(config.social, merged)) {
+        config.social = merged
+        socialChanged = true
+      }
+    }
+
+    if (modeChanged || socialChanged) {
       await this.saveRoomConfig(config)
 
-      // If switching to jukebox mode, re-sort queue by votes
-      if (mode === 'jukebox' && oldMode === 'karaoke') {
-        const state = await this.getQueueState()
-        state.queue = sortByVotes(state.queue)
-        await this.saveQueueState(state)
-        this.broadcastState()
-      }
-      // If switching to karaoke mode, re-sort queue by epochs
-      else if (mode === 'karaoke' && oldMode === 'jukebox') {
-        const state = await this.getQueueState()
-        state.queue = sortQueue(state.queue)
-        await this.saveQueueState(state)
-        this.broadcastState()
+      if (modeChanged) {
+        // If switching to jukebox mode, re-sort queue by votes
+        if (config.mode === 'jukebox' && previousMode === 'karaoke') {
+          const state = await this.getQueueState()
+          state.queue = sortByVotes(state.queue)
+          await this.saveQueueState(state)
+          this.broadcastState()
+        }
+        // If switching to karaoke mode, re-sort queue by epochs
+        else if (config.mode === 'karaoke' && previousMode === 'jukebox') {
+          const state = await this.getQueueState()
+          state.queue = sortQueue(state.queue)
+          await this.saveQueueState(state)
+          this.broadcastState()
+        }
       }
     }
 

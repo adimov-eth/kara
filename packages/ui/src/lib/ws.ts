@@ -1,9 +1,24 @@
-import type { ServerMessage, ClientMessage, ClientType, QueueState, PlaybackState } from '@karaoke/types';
+import type {
+  ServerMessage,
+  ClientMessage,
+  ClientType,
+  QueueState,
+  PlaybackState,
+  Reaction,
+  ChatMessage,
+  EnergyState,
+} from '@karaoke/types';
 import { getRoomId } from './api';
 
 type StateHandler = (state: QueueState, playback?: PlaybackState, extensionConnected?: boolean) => void;
 type ExtensionStatusHandler = (connected: boolean) => void;
 type SyncHandler = (playback: PlaybackState, serverTimeOffset: number) => void;
+type ReactionHandler = (reaction: Reaction) => void;
+type ChatHandler = (message: ChatMessage) => void;
+type ChatPinnedHandler = (message: ChatMessage) => void;
+type ChatUnpinnedHandler = (messageId: string) => void;
+type EnergyHandler = (state: EnergyState) => void;
+type EnergySkipHandler = () => void;
 
 // Conditional logging - only in development
 const isDev = typeof window !== 'undefined' &&
@@ -27,6 +42,12 @@ interface WebSocketManager {
   onState(handler: StateHandler): void;
   onExtensionStatus(handler: ExtensionStatusHandler): void;
   onSync(handler: SyncHandler): void;
+  onReaction(handler: ReactionHandler): void;
+  onChat(handler: ChatHandler): void;
+  onChatPinned(handler: ChatPinnedHandler): void;
+  onChatUnpinned(handler: ChatUnpinnedHandler): void;
+  onEnergy(handler: EnergyHandler): void;
+  onEnergySkip(handler: EnergySkipHandler): void;
   requestSync(): void;
   getServerTimeOffset(): number;
   isConnected(): boolean;
@@ -46,6 +67,12 @@ export function createWebSocket(): WebSocketManager {
   let stateHandler: StateHandler | null = null;
   let extensionStatusHandler: ExtensionStatusHandler | null = null;
   let syncHandler: SyncHandler | null = null;
+  let reactionHandler: ReactionHandler | null = null;
+  let chatHandler: ChatHandler | null = null;
+  let chatPinnedHandler: ChatPinnedHandler | null = null;
+  let chatUnpinnedHandler: ChatUnpinnedHandler | null = null;
+  let energyHandler: EnergyHandler | null = null;
+  let energySkipHandler: EnergySkipHandler | null = null;
 
   // Server time offset for synchronized playback (serverTime - clientTime)
   let serverTimeOffset = 0;
@@ -103,6 +130,24 @@ export function createWebSocket(): WebSocketManager {
         break;
       case 'sync':
         syncHandler?.(msg.playback, serverTimeOffset);
+        break;
+      case 'reaction':
+        reactionHandler?.(msg.reaction);
+        break;
+      case 'chat':
+        chatHandler?.(msg.message);
+        break;
+      case 'chatPinned':
+        chatPinnedHandler?.(msg.message);
+        break;
+      case 'chatUnpinned':
+        chatUnpinnedHandler?.(msg.messageId);
+        break;
+      case 'energy':
+        energyHandler?.(msg.state);
+        break;
+      case 'energySkip':
+        energySkipHandler?.();
         break;
       case 'error':
         logError('Server error:', msg.message);
@@ -191,6 +236,24 @@ export function createWebSocket(): WebSocketManager {
     },
     onSync(handler: SyncHandler) {
       syncHandler = handler;
+    },
+    onReaction(handler: ReactionHandler) {
+      reactionHandler = handler;
+    },
+    onChat(handler: ChatHandler) {
+      chatHandler = handler;
+    },
+    onChatPinned(handler: ChatPinnedHandler) {
+      chatPinnedHandler = handler;
+    },
+    onChatUnpinned(handler: ChatUnpinnedHandler) {
+      chatUnpinnedHandler = handler;
+    },
+    onEnergy(handler: EnergyHandler) {
+      energyHandler = handler;
+    },
+    onEnergySkip(handler: EnergySkipHandler) {
+      energySkipHandler = handler;
     },
     requestSync() {
       send({ kind: 'syncRequest' });
