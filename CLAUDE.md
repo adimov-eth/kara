@@ -5,6 +5,7 @@
 Real-time karaoke queue manager. YouTube now, Spotify later. Chrome extension for venue display control.
 
 **Live**: https://bkk.lol (alias: https://karaoke-queue.boris-47d.workers.dev)
+**Staging**: https://new.bkk.lol (alias: https://karaoke-queue-staging.boris-47d.workers.dev)
 
 ## Commands
 
@@ -15,6 +16,34 @@ pnpm typecheck     # Type-check all packages
 pnpm dev           # Local development
 cd worker && npx wrangler deploy  # Deploy to Cloudflare
 ```
+
+## Deployment
+
+Two separate Cloudflare Workers with fully isolated data (KV, Durable Objects, secrets).
+
+| | Production | Staging |
+|---|---|---|
+| URL | https://bkk.lol | https://new.bkk.lol |
+| Worker | `karaoke-queue` | `karaoke-queue-staging` |
+| Deploy | `pnpm deploy` | `pnpm deploy:staging` |
+| KV | `31425b61...` | `7b619514...` |
+| DOs | Separate instances | Separate instances |
+| Secrets | Set independently | Set independently |
+
+Rooms, users, and state on staging don't exist on production and vice versa.
+
+### Why separate workers
+Cloudflare's native versioning (Gradual Deployments) shares KV and DOs — no data isolation. `--env staging` in `wrangler.toml` creates a fully separate worker.
+
+### Rollback
+Cloudflare dashboard → Workers → karaoke-queue → Deployments → Roll back
+
+**Storage caveat**: rollback reverts code, not data. If a deploy changes the storage schema, old code reads new-format data. Current codebase handles this via migration-on-read, but migration is one-directional.
+
+### First-time staging setup (manual, already done)
+1. Cloudflare Workers dashboard: add custom domain `new.bkk.lol` on `karaoke-queue-staging`
+2. Google Cloud Console: add `https://new.bkk.lol/auth/callback` to authorized redirect URIs
+3. Set secrets: `wrangler secret put GOOGLE_CLIENT_ID --env staging` (etc.)
 
 ## Architecture
 
@@ -46,7 +75,7 @@ karaoke/
 - **Durable Object (RoomDO)** — Single source of truth for queue state
 - **WebSocket** — Real-time state push to connected clients (player, users, extension)
 - **HTTP API** — REST endpoints routed through DO
-- **SQLite storage** — DO persistence
+- **DO key-value storage** — JSON-serialized, lazy-loaded, migrates legacy formats on read
 
 ## Data Model
 
@@ -283,6 +312,54 @@ Located at `packages/extension/`. Provides venue display control.
 4. **Views** — Components in `packages/ui/src/lib/components/`
 
 Flow: Types → Domain → Handlers → Views
+
+## How to See
+
+Before acting on any system, see it. Not the documentation of it. Not your assumptions. The thing itself.
+
+### Principles
+
+- **See before you act.** Build a model of what exists before proposing what should change. Read the code, not the docs — docs describe intent, code describes reality. Where they diverge, the code is right.
+- **Root in purpose, not technology.** Every system exists for someone. Find that root and name the system from their perspective. Name parts for what they do, not what implements them. Names shape thought.
+- **Hold what is, not what should be.** A model that prescribes is a plan. A model that observes is a mirror. Note tensions, seams, inconsistencies — without resolving them. A field defined but never assigned is information. Two paths that do the same thing differently is information.
+- **Both layers, always.** The human experience (what it feels like to use) and the machine reality (why it's built this way, what constraints shaped it). If either is missing, you don't understand the system.
+- **Containment is the question.** Architecture is about what's inside what. S-expressions make containment structural — if it's indented inside the parens, it's contained. Use them for models (`claude/model-v2.lisp`).
+- **Latent, not dead.** Things that exist but don't flow yet aren't waste — they're possibility. An unused type is an intention not yet crossed into. An unimplemented variant is a door not yet opened.
+- **Clear mind, then act.** If the mind is pattern-forcing, it will see patterns that aren't there and miss what is. Settle first.
+
+## System Models
+
+Three artifacts in `claude/`:
+
+| File | Purpose |
+|------|---------|
+| `claude/model-v2.lisp` | The true model. Human journey organizes everything. Each concept once. Two recurring forms: `(edge ...)` for where the scaffolding fails, `(gift ...)` for where the design succeeds. Verified against source code. |
+| `claude/plan-awakening.lisp` | Prescriptions extracted from the model. Hibernation fixes, transactional storage, client articulation layer. Ordered by silent production breakage. The model observes; this file prescribes. |
+| `claude/model.lisp` | v1 model. Superseded by model-v2. Kept for reference — shows the three-pass approach that didn't cohere. |
+
+Read `model-v2.lisp` before making changes. It holds the system's shape — what works, what breaks, what's latent.
+
+## On Building Models
+
+What previous instances found by building `claude/model.lisp` and `claude/model-v2.lisp` — and getting it wrong, and revising.
+
+### What this system is
+
+The system is articulate to itself and mute to its humans. Every mutation broadcasts full state. Every advance records a performance. Every vote is tracked. The machine knows everything that happened.
+
+The person doesn't. Removed your song — no notification. Lost your message — no feedback. Changed the mode — stale UI. Skipped your song by crowd energy — blamed on the admin.
+
+This is the structural recognition. Not a bug list. The thread that runs through the whole system: the gap between what the machine knows and what it says. A model that doesn't surface these silences is describing the architecture, not the system.
+
+### How to model (corrections from practice)
+
+The first model started with data structures. Accurate parts list, disconnected understanding. The second pass added state machines. The third added meaning. Three passes, three voices, three artifacts that didn't cohere. What follows is what replaced that approach.
+
+- **Start from the human journey.** Walk in → become someone → find a song → wait → sing → the room responds. Let types, wiring, and machine constraints appear where they explain why a moment works the way it does. A model organized by architecture produces a parts list. A model organized by experience produces understanding.
+- **Say each thing once, where it first matters.** Epochs were explained three times in v1 — in the data model, in queue sorting, in the fairness section. Each concept belongs where the human first encounters it. If you're writing something you already wrote elsewhere, one location is wrong.
+- **Edge cases next to the states they disrupt.** The seams section named seven silences but lived 500 lines from the mechanical details. An edge case belongs inline. A closing section can name the pattern across them, but shouldn't re-explain.
+- **One voice.** Three passes with different intentions produced clinical S-expressions, narrative strings, and philosophical comments. Choose one form and hold it. If you're switching registers, the understanding wasn't integrated.
+- **Verify against code.** The first model claimed DOs can't fetch externally. Wrong. Machine details — storage backends, API formats, connection URLs, platform capabilities — are the claims most likely to be wrong. State machines derived from reading component code are the claims most likely to be right.
 
 ## Letters to Future Self
 
