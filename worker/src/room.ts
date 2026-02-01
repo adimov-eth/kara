@@ -151,9 +151,12 @@ interface SocketAttachment {
 }
 
 // Persisted timer deadlines (replaces setTimeout for hibernation safety)
+// Only ONE alarm exists per DO, so we store all pending deadlines and
+// setAlarm to the soonest one. The alarm handler checks which fired.
 interface PendingTimers {
   pinnedMessageExpiry?: number
   pinnedMessageId?: string
+  energySkipExpiry?: number
 }
 
 export class RoomDO implements DurableObject {
@@ -727,31 +730,54 @@ export class RoomDO implements DurableObject {
     const config = await this.getSocialConfig()
     if (!config.energySkipEnabled) {
       this.energyBelowThresholdSince = null
+      await this.clearEnergySkipTimer()
       return
     }
 
     const state = await this.getQueueState()
     if (!state.nowPlaying) {
       this.energyBelowThresholdSince = null
+      await this.clearEnergySkipTimer()
       return
     }
 
     if (energyState.level >= config.energySkipThreshold) {
+      // Energy recovered — cancel any pending skip
       this.energyBelowThresholdSince = null
+      await this.clearEnergySkipTimer()
       return
     }
 
+    // Energy is below threshold
     const now = Date.now()
     if (!this.energyBelowThresholdSince) {
+      // Just dropped below — start the timer
       this.energyBelowThresholdSince = now
+      const expiry = now + config.energySkipDuration * 1000
+      await this.updateTimers({ energySkipExpiry: expiry })
       return
     }
 
+    // Check if we've been below threshold long enough (handles the case
+    // where alarm hasn't fired yet but a reaction triggers re-check)
     if (now - this.energyBelowThresholdSince >= config.energySkipDuration * 1000) {
-      this.energyBelowThresholdSince = null
-      this.broadcastToClientTypes(['player', 'user'], { kind: 'energySkip' })
-      await this.doAdvanceQueue(state, { kind: 'skipped', by: 'admin' })
+      await this.executeEnergySkip()
     }
+  }
+
+  private async clearEnergySkipTimer(): Promise<void> {
+    const timers = await this.state.storage.get<PendingTimers>(TIMERS_KEY)
+    if (timers?.energySkipExpiry) {
+      await this.updateTimers({ energySkipExpiry: undefined })
+    }
+  }
+
+  private async executeEnergySkip(): Promise<void> {
+    this.energyBelowThresholdSince = null
+    const state = await this.getQueueState()
+    if (!state.nowPlaying) return
+    this.broadcastToClientTypes(['player', 'user'], { kind: 'energySkip' })
+    await this.doAdvanceQueue(state, { kind: 'skipped', by: 'energy' })
   }
 
   private clearPinnedMessage(messageId: string): void {
@@ -761,11 +787,39 @@ export class RoomDO implements DurableObject {
     this.broadcastToClientTypes(['player'], { kind: 'chatUnpinned', messageId })
   }
 
+  /**
+   * Merge timer fields into persisted PendingTimers and setAlarm to soonest deadline.
+   * Only ONE alarm exists per DO — this ensures both timer types coexist.
+   */
+  private async updateTimers(update: Partial<PendingTimers>): Promise<void> {
+    const existing = await this.state.storage.get<PendingTimers>(TIMERS_KEY) ?? {}
+    const timers: PendingTimers = { ...existing, ...update }
+
+    // Clean up cleared fields
+    if (update.pinnedMessageExpiry === undefined && 'pinnedMessageExpiry' in update) {
+      delete timers.pinnedMessageExpiry
+      delete timers.pinnedMessageId
+    }
+    if (update.energySkipExpiry === undefined && 'energySkipExpiry' in update) {
+      delete timers.energySkipExpiry
+    }
+
+    // Find soonest deadline
+    const deadlines = [timers.pinnedMessageExpiry, timers.energySkipExpiry].filter(Boolean) as number[]
+
+    if (deadlines.length === 0) {
+      await this.state.storage.delete(TIMERS_KEY)
+      await this.state.storage.deleteAlarm()
+      return
+    }
+
+    await this.state.storage.put(TIMERS_KEY, timers)
+    await this.state.storage.setAlarm(Math.min(...deadlines))
+  }
+
   private async schedulePinnedMessageClear(messageId: string): Promise<void> {
     const expiry = Date.now() + PINNED_MESSAGE_TTL_MS
-    const timers: PendingTimers = { pinnedMessageExpiry: expiry, pinnedMessageId: messageId }
-    await this.state.storage.put(TIMERS_KEY, timers)
-    await this.state.storage.setAlarm(expiry)
+    await this.updateTimers({ pinnedMessageExpiry: expiry, pinnedMessageId: messageId })
   }
 
   private sendPinnedMessageIfActive(ws: WebSocket): void {
@@ -962,20 +1016,38 @@ export class RoomDO implements DurableObject {
     if (!timers) return
 
     const now = Date.now()
+    let handled = false
 
+    // Handle pinned message expiry
     if (timers.pinnedMessageExpiry && now >= timers.pinnedMessageExpiry && timers.pinnedMessageId) {
       if (this.pinnedMessage?.id === timers.pinnedMessageId) {
-        // Message still pinned in memory — clear it normally
         this.clearPinnedMessage(timers.pinnedMessageId)
       } else {
         // After hibernation wake, pinnedMessage is null but the player may still display it.
-        // Send unpin to ensure the player clears the stale pinned message.
         this.broadcastToClientTypes(['player'], { kind: 'chatUnpinned', messageId: timers.pinnedMessageId })
       }
+      delete timers.pinnedMessageExpiry
+      delete timers.pinnedMessageId
+      handled = true
     }
 
-    // Clean up timer storage
-    await this.state.storage.delete(TIMERS_KEY)
+    // Handle energy skip expiry
+    if (timers.energySkipExpiry && now >= timers.energySkipExpiry) {
+      delete timers.energySkipExpiry
+      handled = true
+      await this.executeEnergySkip()
+    }
+
+    if (!handled) return
+
+    // Reschedule for any remaining timers
+    const remaining = [timers.pinnedMessageExpiry, timers.energySkipExpiry].filter(Boolean) as number[]
+    if (remaining.length > 0) {
+      await this.state.storage.put(TIMERS_KEY, timers)
+      await this.state.storage.setAlarm(Math.min(...remaining))
+    } else {
+      await this.state.storage.delete(TIMERS_KEY)
+    }
   }
 
   private async handleClientMessage(ws: WebSocket, msg: ClientMessage): Promise<void> {
@@ -1511,6 +1583,9 @@ export class RoomDO implements DurableObject {
   }
 
   private async doAdvanceQueue(state: QueueState, outcome: PerformanceOutcome): Promise<void> {
+    // Reset energy skip tracking — new song, fresh start
+    this.energyBelowThresholdSince = null
+    await this.clearEnergySkipTimer()
     await this.doAdvanceQueueCore(state, outcome)
   }
 
@@ -2170,6 +2245,9 @@ export class RoomDO implements DurableObject {
 
     if (modeChanged || socialChanged) {
       await this.saveRoomConfig(config)
+
+      // Notify all clients of config change
+      this.broadcast({ kind: 'configUpdated', config })
 
       if (modeChanged) {
         // If switching to jukebox mode, re-sort queue by votes

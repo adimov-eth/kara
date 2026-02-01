@@ -7,6 +7,7 @@ import type {
   Reaction,
   ChatMessage,
   EnergyState,
+  RoomConfig,
 } from '@karaoke/types';
 import { getRoomId } from './api';
 
@@ -20,6 +21,8 @@ type ChatUnpinnedHandler = (messageId: string) => void;
 type EnergyHandler = (state: EnergyState) => void;
 type EnergySkipHandler = () => void;
 type RemovedHandler = (entryId: string) => void;
+type ConfigUpdatedHandler = (config: RoomConfig) => void;
+type ConnectionHandler = (connected: boolean) => void;
 
 // Conditional logging - only in development
 const isDev = typeof window !== 'undefined' &&
@@ -50,6 +53,8 @@ interface WebSocketManager {
   onEnergy(handler: EnergyHandler): void;
   onEnergySkip(handler: EnergySkipHandler): void;
   onRemoved(handler: RemovedHandler): void;
+  onConfigUpdated(handler: ConfigUpdatedHandler): void;
+  onConnection(handler: ConnectionHandler): void;
   requestSync(): void;
   getServerTimeOffset(): number;
   isConnected(): boolean;
@@ -76,6 +81,8 @@ export function createWebSocket(): WebSocketManager {
   let energyHandler: EnergyHandler | null = null;
   let energySkipHandler: EnergySkipHandler | null = null;
   let removedHandler: RemovedHandler | null = null;
+  let configUpdatedHandler: ConfigUpdatedHandler | null = null;
+  let connectionHandler: ConnectionHandler | null = null;
 
   // Server time offset for synchronized playback (serverTime - clientTime)
   let serverTimeOffset = 0;
@@ -155,6 +162,9 @@ export function createWebSocket(): WebSocketManager {
       case 'removed':
         removedHandler?.(msg.entryId);
         break;
+      case 'configUpdated':
+        configUpdatedHandler?.(msg.config);
+        break;
       case 'error':
         logError('Server error:', msg.message);
         break;
@@ -177,6 +187,7 @@ export function createWebSocket(): WebSocketManager {
         log('Connected');
         connected = true;
         reconnectAttempts = 0;
+        connectionHandler?.(true);
         ws!.send(JSON.stringify({ kind: 'subscribe', clientType }));
         startHeartbeat();
       };
@@ -193,6 +204,7 @@ export function createWebSocket(): WebSocketManager {
       ws.onclose = () => {
         log('Disconnected');
         connected = false;
+        connectionHandler?.(false);
         ws = null;
         stopHeartbeat();
 
@@ -263,6 +275,12 @@ export function createWebSocket(): WebSocketManager {
     },
     onRemoved(handler: RemovedHandler) {
       removedHandler = handler;
+    },
+    onConfigUpdated(handler: ConfigUpdatedHandler) {
+      configUpdatedHandler = handler;
+    },
+    onConnection(handler: ConnectionHandler) {
+      connectionHandler = handler;
     },
     requestSync() {
       send({ kind: 'syncRequest' });

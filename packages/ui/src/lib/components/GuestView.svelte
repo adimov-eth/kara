@@ -58,6 +58,7 @@
   // Room config (for mode display)
   let roomConfig = $state<RoomConfig | null>(null);
   let chatMessages = $state<ChatMessage[]>([]);
+  let wsConnected = $state(false);
 
   // Form state
   let selectedSong = $state<SearchResult | null>(null);
@@ -137,6 +138,16 @@
     ws.onEnergySkip(() => personalStore.handleEnergySkip());
     ws.onChat((message) => {
       chatMessages = [...chatMessages, message].slice(-100);
+    });
+    ws.onConnection((connected) => {
+      wsConnected = connected;
+    });
+    ws.onConfigUpdated((config) => {
+      const previousMode = roomConfig?.mode;
+      roomConfig = config;
+      if (previousMode && config.mode !== previousMode) {
+        toastStore.info(`Room switched to ${config.mode === 'jukebox' ? 'Jukebox' : 'Karaoke'} mode`);
+      }
     });
     ws.connect("user");
 
@@ -218,10 +229,10 @@
     }
 
     // Pre-turn countdown notifications
-    if (newPosition !== null && previousPosition !== null) {
-      if (newPosition === 2 && previousPosition > 2) {
+    if (newPosition !== null) {
+      if (newPosition === 2 && (previousPosition === null || previousPosition > 2)) {
         toastStore.info("2 songs until you're up!");
-      } else if (newPosition === 1 && previousPosition > 1) {
+      } else if (newPosition === 1 && (previousPosition === null || previousPosition > 1)) {
         toastStore.success("You're next! Get ready! 🎤");
       }
     }
@@ -773,13 +784,15 @@
 />
 
 {#if showRecap}
-  <div class="recap-overlay">
+  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+  <div class="recap-overlay" onclick={() => showRecap = false}>
     <div class="recap-content">
       <div class="recap-applause">👏 APPLAUSE! 👏</div>
       <div class="recap-votes">
         {recapVotes > 0 ? "+" : ""}{recapVotes}
       </div>
       <div class="recap-label">VOTES RECEIVED</div>
+      <div class="recap-dismiss">tap to dismiss</div>
     </div>
   </div>
 {/if}
@@ -1080,6 +1093,7 @@
     z-index: 1000;
     animation: fadeIn 0.3s ease;
     backdrop-filter: blur(8px);
+    cursor: pointer;
   }
 
   .recap-content {
@@ -1113,6 +1127,14 @@
     color: var(--text-muted);
     letter-spacing: 0.2em;
     text-transform: uppercase;
+  }
+
+  .recap-dismiss {
+    margin-top: 1.5rem;
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    opacity: 0;
+    animation: fadeIn 0.3s ease 2s forwards;
   }
 
   @keyframes slideDown {

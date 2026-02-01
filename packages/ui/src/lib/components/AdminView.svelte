@@ -117,6 +117,11 @@
       }
     });
 
+    ws.onConfigUpdated((config) => {
+      roomConfig = config;
+      socialConfig = { ...DEFAULT_SOCIAL_CONFIG, ...(config.social ?? {}) };
+    });
+
     ws.connect('admin');
 
     // Fallback polling

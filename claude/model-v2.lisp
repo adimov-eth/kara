@@ -543,14 +543,12 @@
           → normal (on energy-rises-above-threshold. timer reset)
           → auto-skip (on timer-exceeds-duration*1000 ms))
         (auto-skip
-          (records performance {kind: skipped, by: admin}) ;; blame misattributed
+          (records performance {kind: skipped, by: energy})
           (broadcasts energySkip to player)
           (→ doAdvanceQueueCore)
           → normal))
       (edge
-        (energy-skip-labeled-as-admin          ;; { by: 'admin' } not { by: 'room' }
-          "singer sees 'admin skipped your song'. the admin didn't touch anything"
-          "the room went quiet. blame misattributed to the admin")
+        ;; energy-skip-labeled-as-admin: resolved. now records {by: 'energy'}
         (no-reactions-no-decay                 ;; room goes quiet
           "energy stays at whatever it was. could be 15 (below threshold)"
           "timer keeps counting. song gets auto-skipped because nobody reacted")
@@ -801,14 +799,16 @@
   ;; removed reaches all clients, but GuestView doesn't check if the removed entry was mine.
   ;; The information already flows. It just doesn't land.
 
-  ;; Seven structural seams where the system knows something the person doesn't:
+  ;; Two remaining structural seams where the system knows something the person doesn't:
   ;; - (connecting) "the room never tells the user whether it can hear them"
-  ;; - (waiting) "on-deck warning requires gap: entering at #2 directly skips the warning"
-  ;; - (waiting) "admin removes song. no notification. song just vanishes"
-  ;; - (on-stage) "4s recap overlay blocks all interaction"
-  ;; - (who-decides) "energy skip records {by: admin}. blame misattributed"
-  ;; - (who-decides) "mode switch not reactive on guest. UI lies about current mode"
   ;; - (walking-in) "legacy rooms: anyone at /room/admin has full control"
+  ;;
+  ;; Five seams resolved:
+  ;; - (waiting) on-deck warning now fires on first entry at #1 or #2
+  ;; - (waiting) admin song removal now notified via personalStore.handleRemoved
+  ;; - (on-stage) recap overlay now dismissable by tap
+  ;; - (who-decides) energy skip now records {by: 'energy'}, not {by: 'admin'}
+  ;; - (who-decides) mode switch now broadcast via configUpdated WebSocket message
 
   ;; Not dead code, but dead communication.
   ;; The code is scaffolding for permission to participate. It already knew (line 8 of this model).

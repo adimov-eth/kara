@@ -192,7 +192,7 @@ export interface VoteRecord {
 
 export type PerformanceOutcome =
   | { kind: 'completed' }
-  | { kind: 'skipped'; by: 'singer' | 'admin' }
+  | { kind: 'skipped'; by: 'singer' | 'admin' | 'energy' }
   | { kind: 'errored'; reason: string }
 
 export interface Performance {
@@ -511,6 +511,7 @@ export type ServerMessage =
   | { kind: 'chatUnpinned'; messageId: string }
   | { kind: 'energy'; state: EnergyState }
   | { kind: 'energySkip' }
+  | { kind: 'configUpdated'; config: RoomConfig }
 
 // Client -> Server messages
 export type ClientMessage =
