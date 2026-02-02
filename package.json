@@ -5,7 +5,7 @@
   "scripts": {
     "build": "pnpm -r build",
     "dev": "pnpm --filter worker dev",
-    "deploy:prod": "pnpm --filter @karaoke/worker run deploy",
+    "deploy:prod": "pnpm --filter @karaoke/worker run deploy -- --env=\"\"",
     "deploy:staging": "pnpm --filter @karaoke/worker run deploy:staging",
     "typecheck": "pnpm -r typecheck",
     "test": "vitest",
