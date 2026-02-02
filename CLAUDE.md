@@ -14,7 +14,7 @@ pnpm install       # Install dependencies
 pnpm build         # Build all packages (types → domain → ui → inline → extension → worker)
 pnpm typecheck     # Type-check all packages
 pnpm dev           # Local development
-cd worker && npx wrangler deploy  # Deploy to Cloudflare
+pnpm deploy:prod   # Deploy to Cloudflare (prod)
 ```
 
 ## Deployment
