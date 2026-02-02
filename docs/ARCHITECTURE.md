@@ -162,7 +162,7 @@ autoplay restrictions in the main UI.
 1. `pnpm build` builds packages (types/domain/ui/extension/worker).
 2. `pnpm --filter @karaoke/ui build:inline` inlines UI into
    `worker/src/views/generated/`.
-3. `pnpm deploy` deploys the Worker (wrangler).
+3. `pnpm deploy:prod` deploys the Worker (wrangler).
 
 ## Security & Rate Limiting
 - Basic rate limits for search/join/vote/PIN attempts.

@@ -87,7 +87,7 @@ For UX improvements and prioritization, see `docs/UX.md`.
 pnpm install
 pnpm build
 pnpm --filter @karaoke/ui build:inline
-pnpm deploy
+pnpm deploy:prod
 ```
 
 That's it! Wrangler will output your worker URL like:
@@ -129,7 +129,7 @@ Share this link with your friends at the party.
 
 Edit the UI in `packages/ui/` (styles in `packages/ui/src/app.css`), then rebuild:
 - `pnpm --filter @karaoke/ui build:inline` (regenerates `worker/src/views/generated/`)
-- `pnpm deploy`
+- `pnpm deploy:prod`
 
 ## Cost
 

@@ -25,7 +25,7 @@ Two separate Cloudflare Workers with fully isolated data (KV, Durable Objects, s
 |---|---|---|
 | URL | https://bkk.lol | https://new.bkk.lol |
 | Worker | `karaoke-queue` | `karaoke-queue-staging` |
-| Deploy | `pnpm deploy` | `pnpm deploy:staging` |
+| Deploy | `pnpm deploy:prod` | `pnpm deploy:staging` |
 | KV | `31425b61...` | `7b619514...` |
 | DOs | Separate instances | Separate instances |
 | Secrets | Set independently | Set independently |

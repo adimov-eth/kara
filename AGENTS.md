@@ -41,7 +41,7 @@ pnpm test packages/domain/src/queue.test.ts
 pnpm test -- --testNamePattern="sortQueue"  # Run specific test by name
 
 # Deployment
-pnpm deploy                           # Build + deploy Worker to Cloudflare
+pnpm deploy:prod                      # Build + deploy Worker to Cloudflare
 ```
 
 ## Code Style Guidelines
