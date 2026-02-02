@@ -7,6 +7,7 @@
     "build": "esbuild src/index.ts --bundle --format=esm --outfile=dist/worker.js --external:cloudflare:*",
     "dev": "wrangler dev",
     "deploy": "pnpm build && wrangler deploy",
+    "deploy:prod": "pnpm build && wrangler deploy --env \"\"",
     "deploy:staging": "pnpm build && wrangler deploy --env staging",
     "typecheck": "tsc --noEmit"
   },
