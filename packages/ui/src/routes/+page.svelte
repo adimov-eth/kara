@@ -1,6 +1,7 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
   import { toastStore } from '$lib/stores/toast.svelte';
+  import { setAdminToken } from '$lib';
 
   // State
   let roomCode = $state('');
@@ -160,17 +161,15 @@
       if (result.kind === 'created') {
         saveRecentRoom(roomCode);
         // Store admin token
-        if (typeof sessionStorage !== 'undefined') {
-          // After creation, auto-login with the PIN
-          const verifyRes = await fetch(`/api/admin/verify?room=${encodeURIComponent(roomCode)}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ pin }),
-          });
-          const verifyResult = await verifyRes.json();
-          if (verifyResult.kind === 'verified') {
-            sessionStorage.setItem(`karaoke_admin_token_${roomCode}`, verifyResult.token);
-          }
+        // After creation, auto-login with the PIN
+        const verifyRes = await fetch(`/api/admin/verify?room=${encodeURIComponent(roomCode)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pin }),
+        });
+        const verifyResult = await verifyRes.json();
+        if (verifyResult.kind === 'verified') {
+          setAdminToken(verifyResult.token, roomCode);
         }
         toastStore.success('Room created!');
         goto(`/${roomCode}/admin`);

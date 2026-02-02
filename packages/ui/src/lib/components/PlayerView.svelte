@@ -30,6 +30,7 @@
   let room = $state<QueueState>({ queue: [], nowPlaying: null, currentEpoch: 0 });
   let wsConnected = $state(false);
   let roomId = $state('');
+  let idleMessage = $state<string | null>(null);
 
   let player: YT.Player | null = null;
   let playerReady = $state(false);
@@ -42,6 +43,8 @@
   let pauseTimeout: ReturnType<typeof setTimeout> | null = null;
   let countdown = $state(0);
   let countdownInterval: ReturnType<typeof setInterval> | null = null;
+  let interactionCheckTimeout: ReturnType<typeof setTimeout> | null = null;
+  let interactionRetryTimeout: ReturnType<typeof setTimeout> | null = null;
 
   // Track if we need user interaction to start
   let pendingSong: Entry | null = null;
@@ -109,7 +112,6 @@
     }
 
     ws.onState((newState, playback) => {
-      wsConnected = true;
       handleStateUpdate(newState);
 
       // Handle initial playback state from state message
@@ -162,6 +164,18 @@
       toastStore.info('Energy dipped - skipping');
     });
 
+    ws.onConnection((connected) => {
+      wsConnected = connected;
+      if (connected) {
+        if (pollInterval) {
+          clearInterval(pollInterval);
+          pollInterval = null;
+        }
+      } else {
+        startPolling();
+      }
+    });
+
     ws.connect('player');
 
     // Fallback polling
@@ -204,6 +218,7 @@
   });
 
   function startPolling() {
+    if (pollInterval) return;
     pollInterval = setInterval(async () => {
       if (!wsConnected) {
         const state = await getState();
@@ -246,7 +261,7 @@
     // Adjust for clock offset: server's "now" = our now + offset
     const adjustedNow = now + serverTimeOffset;
     const elapsedSinceStart = (adjustedNow - playback.startedAt) / 1000;
-    const targetPosition = playback.position + elapsedSinceStart;
+    const targetPosition = elapsedSinceStart;
 
     // Get current player position
     const currentPosition = player.getCurrentTime();
@@ -270,6 +285,9 @@
     const prevPlaying = previousNowPlaying;
     previousNowPlaying = newState.nowPlaying;
     room = newState;
+    if (room.nowPlaying || room.queue.length > 0) {
+      idleMessage = null;
+    }
 
     // Auto-start if queue has songs but nothing playing
     if (!room.nowPlaying && room.queue.length > 0 && !isAdvancing) {
@@ -356,16 +374,22 @@
     player?.loadVideoById(entry.videoId);
 
     // Check if playback actually started after a short delay
-    setTimeout(() => {
-      if (player && pendingSong) {
+    interactionCheckTimeout = setTimeout(() => {
+      if (player && pendingSong && currentVideoId === entry.videoId) {
         const state = player.getPlayerState();
         // -1 = unstarted, 3 = buffering is ok, 1 = playing is ok
-        // If still unstarted after load, likely blocked
         if (state === -1 || state === 5) { // UNSTARTED or CUED
-          playerMode = 'needs_interaction';
+          interactionRetryTimeout = setTimeout(() => {
+            if (player && pendingSong && currentVideoId === entry.videoId) {
+              const retryState = player.getPlayerState();
+              if (retryState === -1 || retryState === 5) {
+                playerMode = 'needs_interaction';
+              }
+            }
+          }, 2500);
         }
       }
-    }, 1000);
+    }, 2500);
   }
 
   function handleStartClick() {
@@ -386,6 +410,14 @@
     // Start countdown
     countdown = Math.ceil(PAUSE_DURATION / 1000);
     countdownInterval = setInterval(() => {
+      if (room.queue.length === 0 && !room.nowPlaying) {
+        clearTimers();
+        countdown = 0;
+        pauseTimeout = setTimeout(() => {
+          playerMode = 'idle_screen';
+        }, 1200);
+        return;
+      }
       countdown--;
       if (countdown <= 0) {
         clearTimers();
@@ -408,6 +440,14 @@
       clearInterval(countdownInterval);
       countdownInterval = null;
     }
+    if (interactionCheckTimeout) {
+      clearTimeout(interactionCheckTimeout);
+      interactionCheckTimeout = null;
+    }
+    if (interactionRetryTimeout) {
+      clearTimeout(interactionRetryTimeout);
+      interactionRetryTimeout = null;
+    }
   }
 
   async function advanceToNext() {
@@ -415,30 +455,41 @@
     isAdvancing = true;
     clearTimers();
 
-    try {
-      const currentId = room.nowPlaying?.id ?? null;
-      const roomParam = roomId ? `?room=${encodeURIComponent(roomId)}` : '';
-      await fetch(`/api/next${roomParam}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ currentId }),
-      });
-      // State will update via WebSocket
-    } catch (err) {
-      console.error('Failed to advance:', err);
-      playerMode = 'idle_screen';
-    } finally {
-      isAdvancing = false;
+    const currentId = room.nowPlaying?.id ?? null;
+    const roomParam = roomId ? `?room=${encodeURIComponent(roomId)}` : '';
+    const maxRetries = 2;
+    let attempts = 0;
+
+    while (attempts <= maxRetries) {
+      try {
+        const res = await fetch(`/api/next${roomParam}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ currentId }),
+        });
+        if (!res.ok) {
+          throw new Error('Advance failed');
+        }
+        // State will update via WebSocket
+        isAdvancing = false;
+        return;
+      } catch (err) {
+        attempts += 1;
+        if (attempts > maxRetries) {
+          console.error('Failed to advance:', err);
+          toastStore.error('Connection lost — scan to add songs');
+          idleMessage = 'Connection lost — scan to add songs';
+          playerMode = 'idle_screen';
+          player?.pauseVideo();
+          isAdvancing = false;
+          return;
+        }
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
     }
+    isAdvancing = false;
   }
 
-  function getConnectionStatus(): { class: string; text: string } {
-    if (wsConnected) return { class: 'connected', text: 'Live' };
-    if (pollInterval) return { class: 'polling', text: 'Polling' };
-    return { class: 'disconnected', text: 'Connecting...' };
-  }
-
-  const connectionStatus = $derived(getConnectionStatus());
 
   // =============================================================================
   // Controls Panel Functions
@@ -637,9 +688,11 @@
 </script>
 
 <div class="player-container">
-  <div class="connection-status {connectionStatus.class}">
-    {connectionStatus.text}
-  </div>
+  {#if !wsConnected}
+    <div class="connection-indicator" aria-label="Reconnecting" title="Reconnecting...">
+      <span class="connection-dot"></span>
+    </div>
+  {/if}
 
   {#if energyState}
     <EnergyMeter energyState={energyState} />
@@ -708,7 +761,7 @@
         <div class="idle-title">Karaoke Night</div>
         <div class="idle-subtitle">{roomId || 'default'}</div>
         <img src={qrUrl} alt="Join queue" class="qr-code qr-large" />
-        <div class="idle-cta">Scan to add your song</div>
+        <div class="idle-cta">{idleMessage ?? 'Scan to add your song'}</div>
       </div>
 
       <div class="idle-decoration">
@@ -1239,36 +1292,41 @@
     font-size: 0.85rem;
   }
 
-  /* Connection Status */
-  .connection-status {
+  /* Connection Indicator */
+  .connection-indicator {
     position: fixed;
-    top: 12px;
-    right: 12px;
-    padding: 6px 12px;
-    border-radius: 20px;
-    font-size: 0.7rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    z-index: 100;
+    top: 14px;
+    right: 14px;
+    width: 14px;
+    height: 14px;
+    z-index: 120;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
 
-  .connection-status.connected {
-    background: rgba(78, 205, 196, 0.2);
-    color: var(--cyan);
-    border: 1px solid rgba(78, 205, 196, 0.3);
+  .connection-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #ffa502;
+    box-shadow: 0 0 0 6px rgba(255, 165, 2, 0.15);
+    animation: pulse-indicator 1.4s ease-in-out infinite;
   }
 
-  .connection-status.polling {
-    background: rgba(255, 165, 2, 0.2);
-    color: #ffa502;
-    border: 1px solid rgba(255, 165, 2, 0.3);
-  }
-
-  .connection-status.disconnected {
-    background: rgba(255, 107, 129, 0.2);
-    color: #ff6b81;
-    border: 1px solid rgba(255, 107, 129, 0.3);
+  @keyframes pulse-indicator {
+    0% {
+      transform: scale(0.9);
+      opacity: 0.7;
+    }
+    50% {
+      transform: scale(1);
+      opacity: 1;
+    }
+    100% {
+      transform: scale(0.9);
+      opacity: 0.7;
+    }
   }
 
   /* Info bar adjustments for controls */

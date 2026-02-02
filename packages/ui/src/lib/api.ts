@@ -11,6 +11,7 @@ import type {
   PopularSongsResult,
   CreateRoomResult,
   CheckRoomResult,
+  RoomClaimResult,
   AdminVerifyResult,
   SetConfigResult,
   RoomConfig,
@@ -46,6 +47,7 @@ export type {
   PopularSongsResult,
   CreateRoomResult,
   CheckRoomResult,
+  RoomClaimResult,
   AdminVerifyResult,
   SetConfigResult,
   RoomConfig,
@@ -97,13 +99,14 @@ interface ApiOptions {
   headers?: Record<string, string>;
   body?: unknown;
   skipRoom?: boolean; // For endpoints that don't need room param
+  signal?: AbortSignal;
 }
 
 async function api<T extends HasErrorKind>(
   path: string,
   options: ApiOptions = {}
 ): Promise<T> {
-  const { method = 'GET', headers = {}, body, skipRoom = false } = options;
+  const { method = 'GET', headers = {}, body, skipRoom = false, signal } = options;
 
   // Add room param to path
   let fullPath = `${API}${path}`;
@@ -118,9 +121,13 @@ async function api<T extends HasErrorKind>(
       method,
       headers: body ? { 'Content-Type': 'application/json', ...headers } : headers,
       body: body ? JSON.stringify(body) : undefined,
+      signal,
     });
     return await res.json() as T;
-  } catch {
+  } catch (err) {
+    if (err && typeof err === 'object' && 'name' in err && (err as { name?: string }).name === 'AbortError') {
+      return { kind: 'error', message: 'aborted' } as T;
+    }
     return { kind: 'error', message: 'Network error' } as T;
   }
 }
@@ -172,8 +179,8 @@ export const skip = (userName: string): Promise<SkipResult> =>
 // Search
 // =============================================================================
 
-export const search = (query: string): Promise<SearchQueryResult> =>
-  api(`/search?q=${encodeURIComponent(query)}`);
+export const search = (query: string, signal?: AbortSignal): Promise<SearchQueryResult> =>
+  api(`/search?q=${encodeURIComponent(query)}`, { signal });
 
 // =============================================================================
 // Get State (Fallback Polling)
@@ -258,6 +265,20 @@ export async function createRoom(
   }
 }
 
+export async function claimRoom(pin: string): Promise<RoomClaimResult> {
+  try {
+    const roomId = getRoomId();
+    const res = await fetch(`${API}/room/claim?room=${encodeURIComponent(roomId)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pin }),
+    });
+    return await res.json() as RoomClaimResult;
+  } catch {
+    return { kind: 'error', message: 'Network error' };
+  }
+}
+
 export async function getRoomConfig(): Promise<RoomConfig | null> {
   try {
     const roomId = getRoomId();
@@ -287,31 +308,74 @@ export async function verifyAdminPin(pin: string): Promise<AdminVerifyResult> {
   }
 }
 
-/**
- * Get stored admin token from sessionStorage
- */
-export function getAdminToken(): string | null {
-  if (typeof sessionStorage === 'undefined') return null;
-  const roomId = getRoomId();
-  return sessionStorage.getItem(`karaoke_admin_token_${roomId}`);
+const ADMIN_TOKEN_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
+
+interface StoredAdminToken {
+  token: string;
+  expiresAt: number;
+}
+
+function getAdminTokenKey(roomId: string): string {
+  return `karaoke_admin_token_${roomId}`;
+}
+
+function getAdminStorage(): Storage | null {
+  try {
+    if (typeof localStorage === 'undefined') return null;
+    return localStorage;
+  } catch {
+    return null;
+  }
 }
 
 /**
- * Store admin token in sessionStorage
+ * Get stored admin token from localStorage
  */
-export function setAdminToken(token: string): void {
-  if (typeof sessionStorage === 'undefined') return;
-  const roomId = getRoomId();
-  sessionStorage.setItem(`karaoke_admin_token_${roomId}`, token);
+export function getAdminToken(roomId: string = getRoomId()): string | null {
+  const storage = getAdminStorage();
+  if (!storage) return null;
+  const key = getAdminTokenKey(roomId);
+  const raw = storage.getItem(key);
+  if (!raw) return null;
+
+  try {
+    const parsed = JSON.parse(raw) as StoredAdminToken;
+    if (!parsed || typeof parsed.token !== 'string' || typeof parsed.expiresAt !== 'number') {
+      storage.removeItem(key);
+      return null;
+    }
+    if (Date.now() > parsed.expiresAt) {
+      storage.removeItem(key);
+      return null;
+    }
+    return parsed.token;
+  } catch {
+    storage.removeItem(key);
+    return null;
+  }
 }
 
 /**
- * Clear admin token from sessionStorage
+ * Store admin token in localStorage (per-room, with expiry)
  */
-export function clearAdminToken(): void {
-  if (typeof sessionStorage === 'undefined') return;
-  const roomId = getRoomId();
-  sessionStorage.removeItem(`karaoke_admin_token_${roomId}`);
+export function setAdminToken(token: string, roomId: string = getRoomId()): void {
+  const storage = getAdminStorage();
+  if (!storage) return;
+  const key = getAdminTokenKey(roomId);
+  const payload: StoredAdminToken = {
+    token,
+    expiresAt: Date.now() + ADMIN_TOKEN_TTL_MS,
+  };
+  storage.setItem(key, JSON.stringify(payload));
+}
+
+/**
+ * Clear admin token from localStorage
+ */
+export function clearAdminToken(roomId: string = getRoomId()): void {
+  const storage = getAdminStorage();
+  if (!storage) return;
+  storage.removeItem(getAdminTokenKey(roomId));
 }
 
 /**

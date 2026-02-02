@@ -9,6 +9,7 @@
 ;; ============================================================================
 
 (plan serializeAttachment
+  ;; STATUS: DONE (2026-02-02)
   ;; Addresses: model section 9, websocket-attachments observation
   ;; (Maps die on wake → identity lost → social features silently break)
 
@@ -30,6 +31,7 @@
 ;; ============================================================================
 
 (plan tags-for-broadcast
+  ;; STATUS: DONE (2026-02-02)
   ;; Addresses: model section 9, websocket-tags observation
   ;; (system sets tags but iterates Maps instead → broadcasts fail after wake)
 
@@ -52,6 +54,7 @@
 ;; ============================================================================
 
 (plan alarms-replace-setTimeout
+  ;; STATUS: DONE (2026-02-02)
   ;; Addresses: model section 9, alarms observation
   ;; (setTimeout pins DO in memory → rooms never hibernate → costs money)
 
@@ -71,6 +74,7 @@
 ;; ============================================================================
 
 (plan transactionSync
+  ;; STATUS: NOT IMPLEMENTED (accepted trade-off)
   ;; Addresses: model section 9, transactional-storage observation
   ;; (sequential puts without rollback → partial writes possible on I/O error)
 
@@ -91,6 +95,7 @@
 ;; ============================================================================
 
 (plan articulation-layer
+  ;; STATUS: DONE (2026-02-02)
   ;; Addresses: model section 9, articulation-gap observation
   ;; (events flow but don't land → the system is mute to the person)
 

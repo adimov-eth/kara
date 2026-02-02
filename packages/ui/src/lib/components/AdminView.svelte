@@ -18,6 +18,8 @@
     getRoomConfig,
     setRoomMode,
     setRoomSocialConfig,
+    checkRoom,
+    claimRoom,
     join,
   } from '$lib';
   import { extractVideoId } from '@karaoke/domain';
@@ -27,8 +29,13 @@
   let isAuthenticated = $state(false);
   let authChecked = $state(false);
   let pinInput = $state('');
+  let pinConfirm = $state('');
   let authError = $state('');
   let isAuthenticating = $state(false);
+  let needsClaim = $state(false);
+  let connectionBanner = $state<'hidden' | 'reconnecting' | 'connected'>('hidden');
+  let hasDisconnected = $state(false);
+  let connectionFlashTimeout: ReturnType<typeof setTimeout> | null = null;
 
   // Room state
   let roomId = $state('');
@@ -59,6 +66,32 @@
   let ws = createWebSocket();
   let pollInterval: ReturnType<typeof setInterval> | null = null;
 
+  function startPolling() {
+    if (pollInterval) return;
+    pollInterval = setInterval(async () => {
+      const state = await getState();
+      if (state) room = state;
+    }, 2000);
+  }
+
+  function stopPolling() {
+    if (pollInterval) {
+      clearInterval(pollInterval);
+      pollInterval = null;
+    }
+  }
+
+  function showConnectedFlash() {
+    if (connectionFlashTimeout) {
+      clearTimeout(connectionFlashTimeout);
+    }
+    connectionBanner = 'connected';
+    connectionFlashTimeout = setTimeout(() => {
+      connectionBanner = 'hidden';
+      connectionFlashTimeout = null;
+    }, 1200);
+  }
+
   onMount(() => {
     roomId = getRoomId();
 
@@ -78,7 +111,11 @@
 
   onDestroy(() => {
     ws.disconnect();
-    if (pollInterval) clearInterval(pollInterval);
+    stopPolling();
+    if (connectionFlashTimeout) {
+      clearTimeout(connectionFlashTimeout);
+      connectionFlashTimeout = null;
+    }
   });
 
   $effect(() => {
@@ -89,21 +126,26 @@
 
   async function checkRoomAdmin() {
     try {
-      const res = await fetch(`/api/room/check?room=${encodeURIComponent(roomId)}`);
-      const result = await res.json();
+      const result = await checkRoom(roomId);
 
       if (result.kind === 'notFound') {
         // Room doesn't exist or is default with no config
         // Allow access with legacy X-Admin header
         isAuthenticated = true;
+        needsClaim = false;
         initializeAdmin();
-      } else {
-        // Room exists with admin - require PIN
+      } else if (result.kind === 'exists') {
+        roomConfig = result.config;
+        needsClaim = !result.adminConfigured;
         isAuthenticated = false;
+      } else {
+        isAuthenticated = false;
+        needsClaim = false;
       }
     } catch {
       // On error, show login
       isAuthenticated = false;
+      needsClaim = false;
     }
     authChecked = true;
   }
@@ -111,10 +153,7 @@
   async function initializeAdmin() {
     ws.onState((newState) => {
       room = newState;
-      if (pollInterval) {
-        clearInterval(pollInterval);
-        pollInterval = null;
-      }
+      stopPolling();
     });
 
     ws.onConfigUpdated((config) => {
@@ -122,13 +161,30 @@
       socialConfig = { ...DEFAULT_SOCIAL_CONFIG, ...(config.social ?? {}) };
     });
 
+    ws.onConnection((connected) => {
+      if (connected) {
+        stopPolling();
+        if (hasDisconnected) {
+          showConnectedFlash();
+          hasDisconnected = false;
+        } else {
+          connectionBanner = 'hidden';
+        }
+      } else {
+        hasDisconnected = true;
+        if (connectionFlashTimeout) {
+          clearTimeout(connectionFlashTimeout);
+          connectionFlashTimeout = null;
+        }
+        connectionBanner = 'reconnecting';
+        startPolling();
+      }
+    });
+
     ws.connect('admin');
 
     // Fallback polling
-    pollInterval = setInterval(async () => {
-      const state = await getState();
-      if (state) room = state;
-    }, 2000);
+    startPolling();
 
     // Fetch room config for mode display
     roomConfig = await getRoomConfig();
@@ -156,9 +212,47 @@
       authError = 'Incorrect PIN';
       pinInput = '';
     } else if (result.kind === 'roomNotFound') {
-      authError = 'Room not found';
+      authError = 'No admin PIN set yet';
+      needsClaim = true;
     } else {
       authError = result.message || 'Authentication failed';
+    }
+  }
+
+  async function handleClaimSubmit() {
+    if (pinInput.length !== 6 || !/^\d{6}$/.test(pinInput)) {
+      authError = 'PIN must be 6 digits';
+      return;
+    }
+    if (pinInput !== pinConfirm) {
+      authError = 'PINs do not match';
+      return;
+    }
+
+    isAuthenticating = true;
+    authError = '';
+
+    const result = await claimRoom(pinInput);
+
+    isAuthenticating = false;
+
+    if (result.kind === 'claimed') {
+      setAdminToken(result.token);
+      isAuthenticated = true;
+      needsClaim = false;
+      pinConfirm = '';
+      toastStore.success('Admin PIN set');
+      initializeAdmin();
+    } else if (result.kind === 'alreadyClaimed') {
+      authError = 'This room already has an admin PIN';
+      needsClaim = false;
+      pinConfirm = '';
+    } else if (result.kind === 'roomNotFound') {
+      authError = 'Room not found';
+    } else if (result.kind === 'invalidPin') {
+      authError = result.reason;
+    } else {
+      authError = result.message || 'Failed to set PIN';
     }
   }
 
@@ -166,17 +260,27 @@
     clearAdminToken();
     isAuthenticated = false;
     ws.disconnect();
-    if (pollInterval) {
-      clearInterval(pollInterval);
-      pollInterval = null;
-    }
+    stopPolling();
     pinInput = '';
+    pinConfirm = '';
+    authError = '';
+    needsClaim = false;
+    connectionBanner = 'hidden';
+    hasDisconnected = false;
+    if (connectionFlashTimeout) {
+      clearTimeout(connectionFlashTimeout);
+      connectionFlashTimeout = null;
+    }
     room = { queue: [], nowPlaying: null, currentEpoch: 0 };
   }
 
   function handlePinKeydown(e: KeyboardEvent) {
     if (e.key === 'Enter' && !isAuthenticating) {
-      handlePinSubmit();
+      if (needsClaim) {
+        handleClaimSubmit();
+      } else {
+        handlePinSubmit();
+      }
     }
   }
 
@@ -420,32 +524,73 @@
   </div>
 {:else if !isAuthenticated}
   <div class="container admin-container">
+    {#if connectionBanner !== 'hidden'}
+      <div class="connection-banner {connectionBanner}">
+        {connectionBanner === 'reconnecting' ? 'Reconnecting...' : 'Connected'}
+      </div>
+    {/if}
     <header>
-      <h1>Admin Login</h1>
+      <h1>{needsClaim ? 'Set Admin PIN' : 'Admin Login'}</h1>
       {#if roomId !== 'default'}
         <p class="subtitle">Room: {roomId}</p>
       {/if}
     </header>
 
     <div class="login-card">
-      <div class="input-group">
-        <label class="input-label" for="pinInput">Enter admin PIN</label>
-        <input
-          type="password"
-          id="pinInput"
-          inputmode="numeric"
-          pattern="[0-9]*"
-          maxlength="6"
-          placeholder="000000"
-          bind:value={pinInput}
-          onkeydown={handlePinKeydown}
-          disabled={isAuthenticating}
-        />
-      </div>
+      {#if needsClaim}
+        <div class="input-group">
+          <label class="input-label" for="pinInput">Set admin PIN</label>
+          <input
+            type="password"
+            id="pinInput"
+            inputmode="numeric"
+            pattern="[0-9]*"
+            maxlength="6"
+            placeholder="000000"
+            bind:value={pinInput}
+            onkeydown={handlePinKeydown}
+            disabled={isAuthenticating}
+          />
+        </div>
 
-      <button class="btn" onclick={handlePinSubmit} disabled={isAuthenticating || pinInput.length !== 6}>
-        {isAuthenticating ? 'Verifying...' : 'Login'}
-      </button>
+        <div class="input-group">
+          <label class="input-label" for="pinConfirm">Confirm PIN</label>
+          <input
+            type="password"
+            id="pinConfirm"
+            inputmode="numeric"
+            pattern="[0-9]*"
+            maxlength="6"
+            placeholder="000000"
+            bind:value={pinConfirm}
+            onkeydown={handlePinKeydown}
+            disabled={isAuthenticating}
+          />
+        </div>
+
+        <button class="btn" onclick={handleClaimSubmit} disabled={isAuthenticating || pinInput.length !== 6 || pinConfirm.length !== 6}>
+          {isAuthenticating ? 'Saving...' : 'Set PIN'}
+        </button>
+      {:else}
+        <div class="input-group">
+          <label class="input-label" for="pinInput">Enter admin PIN</label>
+          <input
+            type="password"
+            id="pinInput"
+            inputmode="numeric"
+            pattern="[0-9]*"
+            maxlength="6"
+            placeholder="000000"
+            bind:value={pinInput}
+            onkeydown={handlePinKeydown}
+            disabled={isAuthenticating}
+          />
+        </div>
+
+        <button class="btn" onclick={handlePinSubmit} disabled={isAuthenticating || pinInput.length !== 6}>
+          {isAuthenticating ? 'Verifying...' : 'Login'}
+        </button>
+      {/if}
 
       {#if authError}
         <div class="error-msg">{authError}</div>
@@ -454,6 +599,11 @@
   </div>
 {:else}
   <div class="container admin-container">
+    {#if connectionBanner !== 'hidden'}
+      <div class="connection-banner {connectionBanner}">
+        {connectionBanner === 'reconnecting' ? 'Reconnecting...' : 'Connected'}
+      </div>
+    {/if}
     <header>
       <h1>Admin Control</h1>
       <p class="subtitle">
@@ -784,6 +934,51 @@
     text-align: center;
     padding: 60px 20px;
     color: var(--text-muted);
+  }
+
+  .connection-banner {
+    position: fixed;
+    top: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 6px 14px;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    z-index: 1200;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .connection-banner.reconnecting {
+    background: rgba(255, 165, 2, 0.2);
+    border: 1px solid rgba(255, 165, 2, 0.35);
+    color: #ffa502;
+    animation: pulse-connection 1.2s ease-in-out infinite;
+  }
+
+  .connection-banner.connected {
+    background: rgba(46, 213, 115, 0.2);
+    border: 1px solid rgba(46, 213, 115, 0.35);
+    color: #2ed573;
+  }
+
+  @keyframes pulse-connection {
+    0% {
+      opacity: 0.7;
+      transform: translateX(-50%) scale(0.98);
+    }
+    50% {
+      opacity: 1;
+      transform: translateX(-50%) scale(1);
+    }
+    100% {
+      opacity: 0.7;
+      transform: translateX(-50%) scale(0.98);
+    }
   }
 
   header {

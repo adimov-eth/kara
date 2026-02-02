@@ -15,20 +15,32 @@
   let isSearching = $state(false);
   let selectedId = $state<string | null>(null);
   let errorMsg = $state<string | null>(null);
+  let searchController: AbortController | null = null;
+  let searchToken = 0;
 
   async function performSearch() {
-    if (!query.trim() || isSearching) return;
+    if (!query.trim()) return;
+
+    searchToken += 1;
+    const token = searchToken;
+    if (searchController) {
+      searchController.abort();
+    }
+    searchController = new AbortController();
 
     isSearching = true;
     errorMsg = null;
     results = [];
     selectedId = null;
 
-    const response = await searchApi(query.trim());
+    const response = await searchApi(query.trim(), searchController.signal);
+
+    if (token !== searchToken) return;
 
     isSearching = false;
 
     if (response.kind === "error") {
+      if (response.message === "aborted") return;
       errorMsg = response.message;
       return;
     }

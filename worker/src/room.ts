@@ -28,6 +28,7 @@ import {
   type PopularSongsResult,
   type CreateRoomResult,
   type CheckRoomResult,
+  type RoomClaimResult,
   type AdminVerifyResult,
   type SetConfigResult,
   type SearchResult,
@@ -87,6 +88,7 @@ const VOTES_KEY = 'votes'
 const PERFORMANCES_KEY = 'performances'
 const CONFIG_KEY = 'config'
 const ADMIN_KEY = 'admin'
+const ADMIN_SESSIONS_KEY = 'admin_sessions'
 const USER_STACKS_KEY = 'user_stacks'
 
 const DEFAULT_MAX_STACK_SIZE = 10
@@ -146,6 +148,7 @@ interface SearchCacheEntry {
 // Serialized per-socket metadata that survives DO hibernation
 interface SocketAttachment {
   clientType: ClientType
+  acceptedClientType?: ClientType
   userId?: string
   displayName?: string
 }
@@ -169,14 +172,16 @@ export class RoomDO implements DurableObject {
   private roomAdmin: RoomAdmin | null = null
   // User stacks for jukebox mode (persisted)
   private userStacks: Map<string, StackedSong[]> | null = null
-  // Admin sessions (in-memory, not persisted - sessions clear on DO restart)
-  private adminSessions: Map<string, AdminSession> = new Map()
+  // Admin sessions (persisted to storage; cached in memory)
+  private adminSessionsCache: Map<string, AdminSession> | null = null
   // Rate limiting (in-memory) - keyed by "type:clientId"
   private rateLimits: Map<string, RateLimitEntry> = new Map()
   // Search cache (in-memory) - reduces YouTube API calls
   private searchCache: Map<string, SearchCacheEntry> = new Map()
   // Track extension WebSockets separately (tags can't be updated after acceptWebSocket)
   private extensionSockets: Set<WebSocket> = new Set()
+  // Track sockets whose clientType changed after accept (tag mismatch)
+  private clientTypeOverrides: Set<WebSocket> = new Set()
   // Track client types and identities for WebSockets
   private socketClients: Map<WebSocket, ClientType> = new Map()
   private socketIdentities: Map<WebSocket, { userId: string; displayName: string }> = new Map()
@@ -184,7 +189,6 @@ export class RoomDO implements DurableObject {
   private playbackState: PlaybackState = {
     videoId: null,
     startedAt: 0,
-    position: 0,
     playing: false,
   }
   // Social features (in-memory, not persisted)
@@ -400,7 +404,42 @@ export class RoomDO implements DurableObject {
     await this.state.storage.put(ADMIN_KEY, admin)
   }
 
-  private createAdminSession(): AdminSession {
+  private async getAdminSessions(): Promise<Map<string, AdminSession>> {
+    if (this.adminSessionsCache) return this.adminSessionsCache
+
+    const stored = await this.state.storage.get<Record<string, AdminSession>>(ADMIN_SESSIONS_KEY)
+    const sessions = new Map<string, AdminSession>()
+    const now = Date.now()
+    let pruned = false
+
+    if (stored) {
+      for (const [token, session] of Object.entries(stored)) {
+        if (session.expiresAt > now) {
+          sessions.set(token, session)
+        } else {
+          pruned = true
+        }
+      }
+    }
+
+    this.adminSessionsCache = sessions
+    if (pruned) {
+      await this.saveAdminSessions(sessions)
+    }
+
+    return sessions
+  }
+
+  private async saveAdminSessions(sessions: Map<string, AdminSession>): Promise<void> {
+    this.adminSessionsCache = sessions
+    const stored: Record<string, AdminSession> = {}
+    for (const [token, session] of sessions) {
+      stored[token] = session
+    }
+    await this.state.storage.put(ADMIN_SESSIONS_KEY, stored)
+  }
+
+  private async createAdminSession(): Promise<AdminSession> {
     // Generate random 64-char hex token
     const bytes = new Uint8Array(32)
     crypto.getRandomValues(bytes)
@@ -415,16 +454,20 @@ export class RoomDO implements DurableObject {
       expiresAt: now + ADMIN_SESSION_DURATION_MS,
     }
 
-    this.adminSessions.set(token, session)
+    const sessions = await this.getAdminSessions()
+    sessions.set(token, session)
+    await this.saveAdminSessions(sessions)
     return session
   }
 
-  private isValidAdminToken(token: string | null): boolean {
+  private async isValidAdminToken(token: string | null): Promise<boolean> {
     if (!token) return false
-    const session = this.adminSessions.get(token)
+    const sessions = await this.getAdminSessions()
+    const session = sessions.get(token)
     if (!session) return false
     if (Date.now() > session.expiresAt) {
-      this.adminSessions.delete(token)
+      sessions.delete(token)
+      await this.saveAdminSessions(sessions)
       return false
     }
     return true
@@ -445,13 +488,16 @@ export class RoomDO implements DurableObject {
    */
   private async isAdminRequest(request: Request): Promise<boolean> {
     const token = this.extractAdminToken(request)
-    if (this.isValidAdminToken(token)) {
+    if (await this.isValidAdminToken(token)) {
       return true
     }
     // Allow X-Admin header only for rooms without admin configured
     const admin = await this.getRoomAdmin()
     if (!admin && request.headers.get('X-Admin') === 'true') {
-      return true
+      const config = await this.getRoomConfig()
+      if (!config) {
+        return true
+      }
     }
     return false
   }
@@ -519,12 +565,17 @@ export class RoomDO implements DurableObject {
     this.socketClients.clear()
     this.extensionSockets.clear()
     this.socketIdentities.clear()
+    this.clientTypeOverrides.clear()
 
     for (const ws of this.state.getWebSockets()) {
       const attachment = this.getSocketAttachment(ws)
       if (!attachment) continue
 
       this.socketClients.set(ws, attachment.clientType)
+      const acceptedClientType = attachment.acceptedClientType ?? attachment.clientType
+      if (attachment.clientType !== acceptedClientType) {
+        this.clientTypeOverrides.add(ws)
+      }
       if (attachment.clientType === 'extension') {
         this.extensionSockets.add(ws)
       }
@@ -624,14 +675,30 @@ export class RoomDO implements DurableObject {
     this.ensureMapsRebuilt()
     const data = JSON.stringify(message)
     const allowed = new Set(clientTypes)
-    for (const ws of this.getConnections()) {
-      if (ws === exclude || ws.readyState !== WebSocket.OPEN) continue
-      const clientType = this.socketClients.get(ws) ?? 'user'
-      if (!allowed.has(clientType)) continue
-      try {
-        ws.send(data)
-      } catch {
-        // Ignore send errors
+    const sent = new Set<WebSocket>()
+
+    for (const clientType of allowed) {
+      for (const ws of this.state.getWebSockets(`type:${clientType}`)) {
+        if (ws === exclude || ws.readyState !== WebSocket.OPEN) continue
+        try {
+          ws.send(data)
+          sent.add(ws)
+        } catch {
+          // Ignore send errors
+        }
+      }
+    }
+
+    if (this.clientTypeOverrides.size > 0) {
+      for (const ws of this.clientTypeOverrides) {
+        if (ws === exclude || ws.readyState !== WebSocket.OPEN || sent.has(ws)) continue
+        const clientType = this.socketClients.get(ws) ?? 'user'
+        if (!allowed.has(clientType)) continue
+        try {
+          ws.send(data)
+        } catch {
+          // Ignore send errors
+        }
       }
     }
   }
@@ -665,7 +732,6 @@ export class RoomDO implements DurableObject {
     this.playbackState = {
       videoId,
       startedAt: Date.now(),
-      position: 0,
       playing: true,
     }
     this.broadcastSync()
@@ -675,7 +741,6 @@ export class RoomDO implements DurableObject {
     this.playbackState = {
       videoId: null,
       startedAt: 0,
-      position: 0,
       playing: false,
     }
     this.broadcastSync()
@@ -902,6 +967,9 @@ export class RoomDO implements DurableObject {
       if (path === '/api/room/create' && request.method === 'POST') {
         return this.handleCreateRoom(request)
       }
+      if (path === '/api/room/claim' && request.method === 'POST') {
+        return this.handleClaimRoom(request)
+      }
       if (path === '/api/room/config' && request.method === 'GET') {
         return this.handleGetConfig()
       }
@@ -952,7 +1020,7 @@ export class RoomDO implements DurableObject {
     const identity = await this.getIdentityFromRequest(request)
 
     // Build and serialize attachment (survives hibernation)
-    const attachment: SocketAttachment = { clientType }
+    const attachment: SocketAttachment = { clientType, acceptedClientType: clientType }
     if (identity) {
       attachment.userId = identity.userId
       attachment.displayName = identity.displayName
@@ -986,6 +1054,7 @@ export class RoomDO implements DurableObject {
     // Check if this was an extension
     const wasExtension = this.extensionSockets.has(ws)
     this.extensionSockets.delete(ws)
+    this.clientTypeOverrides.delete(ws)
     this.socketClients.delete(ws)
     this.socketIdentities.delete(ws)
 
@@ -1000,6 +1069,7 @@ export class RoomDO implements DurableObject {
     this.ensureMapsRebuilt()
     // Clean up Maps for the errored socket
     this.extensionSockets.delete(ws)
+    this.clientTypeOverrides.delete(ws)
     this.socketClients.delete(ws)
     this.socketIdentities.delete(ws)
     // WebSocket is automatically removed from state.getWebSockets()
@@ -1056,13 +1126,26 @@ export class RoomDO implements DurableObject {
         // Update in-memory maps
         if (msg.clientType === 'extension') {
           this.extensionSockets.add(ws)
+        } else {
+          this.extensionSockets.delete(ws)
         }
         this.socketClients.set(ws, msg.clientType)
 
         // Update attachment with declared client type (authoritative over URL param)
-        const currentAttachment = this.getSocketAttachment(ws) ?? { clientType: 'user' as ClientType }
+        const currentAttachment = this.getSocketAttachment(ws) ?? {
+          clientType: 'user' as ClientType,
+          acceptedClientType: 'user' as ClientType,
+        }
+        const acceptedClientType = currentAttachment.acceptedClientType ?? currentAttachment.clientType
         currentAttachment.clientType = msg.clientType
+        currentAttachment.acceptedClientType = acceptedClientType
         this.setSocketAttachment(ws, currentAttachment)
+
+        if (msg.clientType !== acceptedClientType) {
+          this.clientTypeOverrides.add(ws)
+        } else {
+          this.clientTypeOverrides.delete(ws)
+        }
 
         const state = await this.getQueueState()
         this.send(ws, {
@@ -2123,7 +2206,8 @@ export class RoomDO implements DurableObject {
       const result: CheckRoomResult = { kind: 'notFound' }
       return Response.json(result)
     }
-    const result: CheckRoomResult = { kind: 'exists', config }
+    const admin = await this.getRoomAdmin()
+    const result: CheckRoomResult = { kind: 'exists', config, adminConfigured: admin !== null }
     return Response.json(result)
   }
 
@@ -2198,6 +2282,49 @@ export class RoomDO implements DurableObject {
     await this.saveRoomAdmin(admin)
 
     const result: CreateRoomResult = { kind: 'created', roomId, config }
+    return Response.json(result)
+  }
+
+  private async handleClaimRoom(request: Request): Promise<Response> {
+    const clientId = this.getClientId(request)
+    if (this.checkRateLimit('pin', clientId)) {
+      const result: RoomClaimResult = { kind: 'error', message: 'Too many attempts. Try again in 1 minute.' }
+      return Response.json(result, { status: 429 })
+    }
+
+    const body = (await request.json()) as { pin?: string }
+    const { pin } = body
+
+    if (!pin || !isValidPin(pin)) {
+      const result: RoomClaimResult = { kind: 'invalidPin', reason: 'PIN must be 6 digits' }
+      return Response.json(result, { status: 400 })
+    }
+
+    const config = await this.getRoomConfig()
+    if (!config) {
+      const result: RoomClaimResult = { kind: 'roomNotFound' }
+      return Response.json(result, { status: 404 })
+    }
+
+    const existingAdmin = await this.getRoomAdmin()
+    if (existingAdmin) {
+      const result: RoomClaimResult = { kind: 'alreadyClaimed' }
+      return Response.json(result, { status: 409 })
+    }
+
+    const salt = generateSalt()
+    const pinHash = await hashPin(pin, salt)
+    const admin: RoomAdmin = {
+      pinHash,
+      salt,
+      createdAt: Date.now(),
+    }
+
+    await this.saveRoomAdmin(admin)
+    this.clearRateLimit('pin', clientId)
+
+    const session = await this.createAdminSession()
+    const result: RoomClaimResult = { kind: 'claimed', token: session.token }
     return Response.json(result)
   }
 
@@ -2279,18 +2406,46 @@ export class RoomDO implements DurableObject {
       return Response.json(result, { status: 429 })
     }
 
-    const body = (await request.json()) as { pin?: string }
-    const { pin } = body
+    const body = (await request.json()) as { pin?: string; newPin?: string }
+    const { pin, newPin } = body
 
-    if (!pin) {
+    if (!pin && !newPin) {
       const result: AdminVerifyResult = { kind: 'error', message: 'PIN required' }
       return Response.json(result, { status: 400 })
     }
 
     const admin = await this.getRoomAdmin()
     if (!admin) {
+      if (newPin && isValidPin(newPin)) {
+        const config = await this.getRoomConfig()
+        if (!config) {
+          const result: AdminVerifyResult = { kind: 'roomNotFound' }
+          return Response.json(result, { status: 404 })
+        }
+
+        const salt = generateSalt()
+        const pinHash = await hashPin(newPin, salt)
+        const newAdmin: RoomAdmin = {
+          pinHash,
+          salt,
+          createdAt: Date.now(),
+        }
+
+        await this.saveRoomAdmin(newAdmin)
+        this.clearRateLimit('pin', clientId)
+
+        const session = await this.createAdminSession()
+        const result: AdminVerifyResult = { kind: 'verified', token: session.token }
+        return Response.json(result)
+      }
+
       const result: AdminVerifyResult = { kind: 'roomNotFound' }
       return Response.json(result, { status: 404 })
+    }
+
+    if (!pin) {
+      const result: AdminVerifyResult = { kind: 'error', message: 'PIN required' }
+      return Response.json(result, { status: 400 })
     }
 
     const valid = await verifyPin(pin, admin.salt, admin.pinHash)
@@ -2302,7 +2457,7 @@ export class RoomDO implements DurableObject {
     // Success - clear rate limit for this client
     this.clearRateLimit('pin', clientId)
 
-    const session = this.createAdminSession()
+    const session = await this.createAdminSession()
     const result: AdminVerifyResult = { kind: 'verified', token: session.token }
     return Response.json(result)
   }

@@ -7,6 +7,7 @@
     UserSession,
     User,
     RoomConfig,
+    RoomMode,
     ChatMessage,
     ReactionEmoji,
   } from "@karaoke/types";
@@ -20,6 +21,8 @@
     getRoomId,
     addSong,
     getRoomConfig,
+    getState,
+    checkIdentity,
     createAnonymousSession,
   } from "$lib";
   import { extractVideoId } from "@karaoke/domain";
@@ -59,6 +62,9 @@
   let roomConfig = $state<RoomConfig | null>(null);
   let chatMessages = $state<ChatMessage[]>([]);
   let wsConnected = $state(false);
+  let connectionBanner = $state<"hidden" | "reconnecting" | "connected">("hidden");
+  let hasDisconnected = $state(false);
+  let connectionFlashTimeout: ReturnType<typeof setTimeout> | null = null;
 
   // Form state
   let selectedSong = $state<SearchResult | null>(null);
@@ -66,6 +72,9 @@
   let validatedTitle = $state<string | null>(null);
   let isJoining = $state(false);
   let joinError = $state<string | null>(null);
+  let selectedMode = $state<RoomMode | null>(null);
+  let nameClaimHint = $state<string | null>(null);
+  let lastIdentityCheckName = $state<string | null>(null);
 
   // PIN modal state
   let pinMode = $state<"claim" | "verify" | "closed">("closed");
@@ -84,6 +93,11 @@
     "idle",
   );
   let validationMsg = $state("");
+  let ytApiLoaded = $state(false);
+  let ytApiUnavailable = $state(false);
+  let ytApiLoadTimeout: ReturnType<typeof setTimeout> | null = null;
+  let validationToken = 0;
+  let activeValidationId: string | null = null;
 
   const MAX_DURATION = 420; // 7 minutes
 
@@ -92,6 +106,46 @@
   let previousNowPlaying: typeof room.nowPlaying = null;
   let previousPosition: number | null = null;
   let previousEntry: Entry | null = null;
+  let pollInterval: ReturnType<typeof setInterval> | null = null;
+  let pollTimeout: ReturnType<typeof setTimeout> | null = null;
+
+  function startPolling() {
+    if (pollInterval) return;
+    pollInterval = setInterval(async () => {
+      const state = await getState();
+      if (state) handleStateUpdate(state);
+    }, 3000);
+  }
+
+  function stopPolling() {
+    if (pollTimeout) {
+      clearTimeout(pollTimeout);
+      pollTimeout = null;
+    }
+    if (pollInterval) {
+      clearInterval(pollInterval);
+      pollInterval = null;
+    }
+  }
+
+  function schedulePollingFallback() {
+    if (pollTimeout) clearTimeout(pollTimeout);
+    pollTimeout = setTimeout(() => {
+      pollTimeout = null;
+      if (!wsConnected) startPolling();
+    }, 2000);
+  }
+
+  function showConnectedFlash() {
+    if (connectionFlashTimeout) {
+      clearTimeout(connectionFlashTimeout);
+    }
+    connectionBanner = "connected";
+    connectionFlashTimeout = setTimeout(() => {
+      connectionBanner = "hidden";
+      connectionFlashTimeout = null;
+    }, 1200);
+  }
 
   // Derived
   const myEntry = $derived(
@@ -133,32 +187,87 @@
     localStorage.setItem("karaoke_voter_id", voterId);
 
     // Connect WebSocket
-    ws.onState(handleStateUpdate);
+    ws.onState((newState) => {
+      stopPolling();
+      handleStateUpdate(newState);
+    });
     ws.onRemoved((entryId) => personalStore.handleRemoved(entryId));
     ws.onEnergySkip(() => personalStore.handleEnergySkip());
     ws.onChat((message) => {
       chatMessages = [...chatMessages, message].slice(-100);
     });
+    ws.onStackUpdated((userId, stack) => {
+      if (session?.userId && userId === session.userId) {
+        myStackRef?.updateStack(stack);
+      }
+    });
+    ws.onPromotedToQueue((userId, entry, remainingStack) => {
+      if (session?.userId && userId === session.userId) {
+        myStackRef?.updateStack(remainingStack);
+        myStackRef?.updateInQueue(entry);
+        toastStore.success("Your next song entered the queue!");
+      }
+    });
     ws.onConnection((connected) => {
       wsConnected = connected;
+      if (connected) {
+        stopPolling();
+        if (hasDisconnected) {
+          showConnectedFlash();
+          hasDisconnected = false;
+        } else {
+          connectionBanner = "hidden";
+        }
+      } else {
+        hasDisconnected = true;
+        if (connectionFlashTimeout) {
+          clearTimeout(connectionFlashTimeout);
+          connectionFlashTimeout = null;
+        }
+        connectionBanner = "reconnecting";
+        schedulePollingFallback();
+      }
     });
     ws.onConfigUpdated((config) => {
       const previousMode = roomConfig?.mode;
       roomConfig = config;
       if (previousMode && config.mode !== previousMode) {
         toastStore.info(`Room switched to ${config.mode === 'jukebox' ? 'Jukebox' : 'Karaoke'} mode`);
+        if (config.mode === 'jukebox') {
+          pinMode = 'closed';
+          pendingJoin = null;
+        }
       }
     });
     ws.connect("user");
+    schedulePollingFallback();
 
     // Initialize personal store identity
     personalStore.setIdentity(myName, session?.userId);
 
     // Load YouTube API
-    if (typeof window !== "undefined" && !window.YT) {
-      const tag = document.createElement("script");
-      tag.src = "https://www.youtube.com/iframe_api";
-      document.head.appendChild(tag);
+    if (typeof window !== "undefined") {
+      if (window.YT) {
+        ytApiLoaded = true;
+        ytApiUnavailable = false;
+      } else {
+        const previousReady = window.onYouTubeIframeAPIReady;
+        window.onYouTubeIframeAPIReady = () => {
+          ytApiLoaded = true;
+          ytApiUnavailable = false;
+          if (previousReady) previousReady();
+        };
+
+        const tag = document.createElement("script");
+        tag.src = "https://www.youtube.com/iframe_api";
+        document.head.appendChild(tag);
+
+        ytApiLoadTimeout = setTimeout(() => {
+          if (!ytApiLoaded) {
+            ytApiUnavailable = true;
+          }
+        }, 5000);
+      }
     }
 
     // Fetch room config for mode display
@@ -167,6 +276,45 @@
 
   onDestroy(() => {
     ws.disconnect();
+    stopPolling();
+    if (connectionFlashTimeout) {
+      clearTimeout(connectionFlashTimeout);
+      connectionFlashTimeout = null;
+    }
+    if (ytApiLoadTimeout) {
+      clearTimeout(ytApiLoadTimeout);
+      ytApiLoadTimeout = null;
+    }
+  });
+
+  $effect(() => {
+    if (!roomConfig || roomMode !== "karaoke") {
+      nameClaimHint = null;
+      lastIdentityCheckName = null;
+      return;
+    }
+
+    const trimmed = myName.trim();
+    if (!trimmed) {
+      nameClaimHint = null;
+      lastIdentityCheckName = null;
+      return;
+    }
+
+    const normalized = trimmed.toLowerCase();
+    if (verifiedNames[normalized] === true) {
+      nameClaimHint = null;
+      lastIdentityCheckName = normalized;
+      return;
+    }
+
+    if (lastIdentityCheckName === normalized) return;
+    lastIdentityCheckName = normalized;
+
+    checkIdentity(trimmed).then(({ claimed }) => {
+      if (myName.trim().toLowerCase() !== normalized) return;
+      nameClaimHint = claimed ? "This name requires a PIN" : null;
+    });
   });
 
   function handleStateUpdate(newState: QueueState) {
@@ -200,10 +348,12 @@
         if (!isVerified) {
           toastStore.success(`Nice! You got ${voteMsg} votes`);
           // Show PIN claim modal after a beat
-          setTimeout(() => {
-            pinName = myName;
-            pinMode = "claim";
-          }, 1500);
+          if (roomMode === 'karaoke') {
+            setTimeout(() => {
+              pinName = myName;
+              pinMode = "claim";
+            }, 1500);
+          }
         } else {
           toastStore.success(`You got ${voteMsg} votes! Add another?`);
         }
@@ -262,6 +412,7 @@
 
   function handleSongSelect(result: SearchResult) {
     selectedSong = result;
+    selectedMode = roomMode;
     const url = `https://www.youtube.com/watch?v=${result.id}`;
     validateUrl(url, result.title);
   }
@@ -278,6 +429,7 @@
       source: "youtube",
       playable: true,
     };
+    selectedMode = roomMode;
     const url = `https://www.youtube.com/watch?v=${videoId}`;
     validateUrl(url, title);
   }
@@ -288,6 +440,7 @@
 
     const videoId = extractVideoId(url);
     if (!videoId) {
+      activeValidationId = null;
       validationStatus = "invalid";
       validationMsg = "Invalid YouTube URL";
       validatedUrl = null;
@@ -295,11 +448,16 @@
       return;
     }
 
+    validationToken += 1;
+    const token = validationToken;
+    activeValidationId = videoId;
+
     // Use YouTube IFrame API to validate
-    if (typeof window !== "undefined" && window.YT) {
-      await validateWithYT(videoId, url, title);
+    if (typeof window !== "undefined" && ytApiLoaded && window.YT) {
+      await validateWithYT(videoId, url, title, token);
     } else {
       // Fallback: trust the URL
+      if (token !== validationToken) return;
       validationStatus = "valid";
       validationMsg = "Ready to add!";
       validatedUrl = url;
@@ -311,10 +469,22 @@
     videoId: string,
     url: string,
     title?: string,
+    token?: number,
   ): Promise<void> {
     return new Promise((resolve) => {
+      const isStale = () => token !== undefined && (token !== validationToken || activeValidationId !== videoId);
+
+      if (isStale()) {
+        resolve();
+        return;
+      }
+
       const container = document.getElementById("validationPlayer");
       if (!container) {
+        if (isStale()) {
+          resolve();
+          return;
+        }
         validationStatus = "valid";
         validatedUrl = url;
         validatedTitle = title ?? "Unknown Song";
@@ -331,6 +501,10 @@
         playerVars: { autoplay: 0, controls: 0 },
         events: {
           onReady: (event: YT.PlayerEvent) => {
+            if (isStale()) {
+              resolve();
+              return;
+            }
             const duration = event.target.getDuration();
             const data = event.target.getVideoData();
 
@@ -359,6 +533,10 @@
             resolve();
           },
           onError: () => {
+            if (isStale()) {
+              resolve();
+              return;
+            }
             validationStatus = "invalid";
             validationMsg = "Video not found or unavailable";
             validatedUrl = null;
@@ -369,6 +547,10 @@
 
       // Timeout fallback
       setTimeout(() => {
+        if (isStale()) {
+          resolve();
+          return;
+        }
         if (validationStatus === "checking") {
           validationStatus = "invalid";
           validationMsg = "Could not load video";
@@ -381,6 +563,12 @@
 
   async function handleJoin() {
     if (!validatedUrl || !validatedTitle) return;
+
+    if (selectedMode && selectedMode !== roomMode) {
+      toastStore.info("Room mode changed. Please try again.");
+      resetForm();
+      return;
+    }
 
     const videoId = extractVideoId(validatedUrl);
     if (!videoId) {
@@ -486,6 +674,7 @@
 
   function resetForm() {
     selectedSong = null;
+    selectedMode = null;
     validatedUrl = null;
     validatedTitle = null;
     validationStatus = "idle";
@@ -620,6 +809,11 @@
 </script>
 
 <div class="container">
+  {#if connectionBanner !== "hidden"}
+    <div class="connection-banner {connectionBanner}">
+      {connectionBanner === "reconnecting" ? "Reconnecting..." : "Connected"}
+    </div>
+  {/if}
   <header>
     <div class="header-top">
       <h1>Karaoke</h1>
@@ -706,6 +900,9 @@
           value={myName}
           oninput={handleNameInput}
         />
+        {#if nameClaimHint}
+          <div class="name-hint">{nameClaimHint}</div>
+        {/if}
       </div>
     {/if}
 
@@ -733,6 +930,10 @@
           {/if}
           {validationMsg}
         </div>
+      {/if}
+
+      {#if ytApiUnavailable}
+        <div class="validation-warning">Video validation unavailable</div>
       {/if}
     </div>
 
@@ -800,6 +1001,51 @@
 <HelpButton />
 
 <style>
+  .connection-banner {
+    position: fixed;
+    top: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 6px 14px;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    z-index: 1200;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .connection-banner.reconnecting {
+    background: rgba(255, 165, 2, 0.2);
+    border: 1px solid rgba(255, 165, 2, 0.35);
+    color: #ffa502;
+    animation: pulse-connection 1.2s ease-in-out infinite;
+  }
+
+  .connection-banner.connected {
+    background: rgba(46, 213, 115, 0.2);
+    border: 1px solid rgba(46, 213, 115, 0.35);
+    color: #2ed573;
+  }
+
+  @keyframes pulse-connection {
+    0% {
+      opacity: 0.7;
+      transform: translateX(-50%) scale(0.98);
+    }
+    50% {
+      opacity: 1;
+      transform: translateX(-50%) scale(1);
+    }
+    100% {
+      opacity: 0.7;
+      transform: translateX(-50%) scale(0.98);
+    }
+  }
+
   header {
     text-align: center;
     margin-bottom: 32px;
@@ -1015,6 +1261,19 @@
 
   .validation-status.invalid {
     color: var(--warning);
+  }
+
+  .validation-warning {
+    margin-top: 8px;
+    color: #ffa502;
+    font-size: 0.85rem;
+    font-weight: 500;
+  }
+
+  .name-hint {
+    margin-top: 6px;
+    color: #ffa502;
+    font-size: 0.85rem;
   }
 
   .validation-spinner {

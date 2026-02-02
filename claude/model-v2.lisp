@@ -89,24 +89,30 @@
       (hash SHA-256(salt + pin). salt = random 16-byte hex))
     (edge
       (name-persists-in-localStorage           ;; user returns days later, old name pre-filled
-        "might be claimed by someone else now")
+        "might be claimed by someone else now"
+        (mitigated "UI hints when name requires a PIN"))
       (same-name-two-devices-unclaimed         ;; both can add songs, both see each other's entries
         "no conflict by design")
       (mode-switch-while-in-pin-modal          ;; admin switches to jukebox
-        "modal stays open. PIN concept doesn't exist in jukebox. confusing")))
+        "modal stays open. PIN concept doesn't exist in jukebox. confusing"
+        (resolved "PIN modal closes on switch to jukebox"))))
 
   ;; --- Door 4: Admin ---
   (admin
     (states
       (loading                                 ;; checking room admin status
-        → authenticated (on saved-token-valid-in-sessionStorage)
-        → authenticated (on no-admin-configured ;; legacy fallback
-          "room/check returns notFound → auto-grant access. X-Admin:true accepted by server")
+        → authenticated (on saved-token-valid-in-localStorage)
+        → authenticated (on no-room-configured ;; legacy default room
+          "room/check returns notFound → allow X-Admin:true when no config exists")
+        → claim-screen (on room-exists-no-admin
+          "room/check returns exists + adminConfigured=false → prompt to set PIN")
         → login-screen (on room-has-admin))
       (login-screen → authenticating (on submit-pin))
+      (claim-screen → authenticating (on submit-new-pin))
       (authenticating
-        → authenticated (on pin-correct. token stored in sessionStorage per-room key)
+        → authenticated (on pin-correct. token stored in localStorage per-room key + client expiry)
         → login-screen (on pin-wrong)
+        → claim-screen (on room-not-found | invalid-claim)
         → login-screen (on rate-limited))      ;; 5 attempts/60s
       (authenticated
         → login-screen (on token-expires)      ;; 4h TTL
@@ -115,16 +121,19 @@
     (token random-64-hex in-memory-on-server 4h-ttl)
     (edge
       (legacy-rooms-wide-open                  ;; no admin PIN → anyone at /room/admin is admin
-        "no UI to set admin PIN on existing room. no upgrade path")
+        "no UI to set admin PIN on existing room. no upgrade path"
+        (resolved "claim flow for configured rooms; X-Admin allowed only when no config exists"))
       (token-in-sessionStorage                 ;; closes with browser
-        "admin reopens → must re-enter PIN. expectation mismatch")
+        "admin reopens → must re-enter PIN. expectation mismatch"
+        (resolved "token stored in localStorage with expiry"))
       (admin-sessions-in-JS-memory             ;; lost on DO hibernation
         (because DO-hibernation "websockets survive sleep, JS memory doesn't")
-        "admin token valid client-side but server forgot it. first API call → 401 → re-login")))
+        "admin token valid client-side but server forgot it. first API call → 401 → re-login"
+        (resolved "admin sessions persisted in DO storage"))))
 
   ;; --- What the system doesn't say ---
   ;; Session expires → stack silently clears, no explanation.
-  ;; Legacy admin → anyone who finds the URL has control.
+  ;; Default room with no config still grants admin via X-Admin header.
   ;; Google display name as karaoke name → irrelevant in karaoke mode, empty name field.
   )
 
@@ -137,8 +146,8 @@
   (websocket
     (url "wss://host/?upgrade=websocket&room=X")
     (states
-      (disconnected → connecting (on mount. no UI indicator on phones)
-        "user sees empty page. doesn't know if loading or broken")
+      (disconnected → connecting (on mount. reconnect indicator on disconnect)
+        "user sees explicit reconnecting state instead of silent failure")
       (connecting → connected (on ws-open + subscribe-ack))
       (connecting → reconnecting (on ws-error))
       (connected → disconnected (on ws-close))
@@ -148,7 +157,7 @@
       (send {kind: subscribe, clientType: user|player|admin|extension})
       (server responds with QueueState + extensionConnected. no playback in initial subscribe)
       (client must syncRequest or wait for broadcastState to get PlaybackState)
-      (server stores socket→role in socketClients, socket→identity in socketIdentities))
+      (server tags socket by clientType, stores identity in Maps + attachment for wake))
     (heartbeat 30s
       (client sends {kind: ping, clientTime: Date.now()})
       (server responds {kind: pong, serverTime, clientTime})
@@ -156,14 +165,13 @@
       (assumption "symmetric network latency" ;; false on mobile. offset error ≤ half RTT)))
 
   (http-fallback
-    (admin 2s-polling-until-ws-connects        ;; then stops and NEVER resumes
-      "if WS connects then drops, admin has no updates until page refresh")
-    (guest no-polling
-      "getState() exists in api.ts, never called by GuestView"
-      "if WS fails, guest sees empty/stale queue forever")
+    (admin 2s-polling-until-ws-connects        ;; resumes on disconnect
+      "polling restarts if WS drops")
+    (guest polling-fallback
+      "starts after WS delay, stops on WS connect, resumes on disconnect")
     (player conditional-polling
       "if WS hasn't connected after 2000ms, starts 2s polling fallback"
-      "stops when WS connects. same stop-never-resume pattern as admin"))
+      "stops when WS connects. resumes on disconnect"))
 
   (who-hears-what
     (state → all)                              ;; full QueueState on every mutation
@@ -183,9 +191,9 @@
       extensionStatus pong sync stackUpdated promotedToQueue
       reaction chat chatPinned chatUnpinned energy energySkip))
 
-  ;; THE FIRST SEAM: the system never tells the user whether it can hear them.
-  ;; No offline indicator on phones. Chat messages sent during reconnect are silently dropped.
-  ;; The user speaks into what they believe is a room. It might be a void.
+  ;; THE FIRST SEAM (resolved):
+  ;; The room now tells the user when it is reconnecting, and chat/reaction
+  ;; messages queue briefly during disconnect instead of vanishing.
   )
 
 
@@ -213,7 +221,8 @@
     (edge
       (no-search-cancellation                  ;; new query doesn't cancel in-flight request
         "type 'beatles', results loading, type 'queen', beatles results arrive first"
-        "UI briefly shows beatles results, then queen results replace them")))
+        "UI briefly shows beatles results, then queen results replace them"
+        (resolved "AbortController cancels in-flight searches")))
 
   (validation
     (states
@@ -227,12 +236,15 @@
       (sanitize: sanitizeName(30 chars) sanitizeTitle(100 chars)))
     (edge
       (validation-race                         ;; select song A, then song B while A validates
-        "ytPlayer DOM element overwritten. song A's validation might complete for song B's context")
+        "ytPlayer DOM element overwritten. song A's validation might complete for song B's context"
+        (resolved "validation token discards stale results"))
       (false-positive-needs-interaction         ;; 1s timeout checks UNSTARTED state
         "YouTube can return UNSTARTED during normal loading"
-        "user sees 'click to start' when video would have auto-played")
+        "user sees 'click to start' when video would have auto-played"
+        (resolved "longer timeout + buffering accepted + retry"))
       (no-yt-api-fallback                      ;; if window.YT fails to load
-        "validation skipped entirely. trust the URL. could add livestream")))
+        "validation skipped entirely. trust the URL. could add livestream"
+        (resolved "warning shown when API fails to load"))))
 
   (adding
     ;; The moment of commitment. Two paths diverge here.
@@ -249,7 +261,8 @@
     (edge
       (mode-switch-during-join                 ;; admin switches mode between search and add
         "client sends to old-mode endpoint. server now in new mode"
-        "server may accept or reject. confusing error message")
+        "server may accept or reject. confusing error message"
+        (resolved "client guards and resets on mode change"))
       (auto-anon-on-jukebox-add               ;; user clicks add without session
         "system creates anonymous session automatically"
         "if creation fails, user sees auth error instead of song error")))
@@ -349,12 +362,12 @@
       "auto-promotion means your songs keep entering the queue without you touching your phone")
     (edge
       (stack-loaded-once                       ;; loaded on mount, refreshed only after user actions
-        "if another device modifies stack, this device shows stale data")
+        "if another device modifies stack, this device shows stale data"
+        (resolved "stackUpdated/promotedToQueue WS updates refresh stacks"))
       (promotion-during-remove                 ;; user removes song while server auto-promotes
         "network race: remove call for song X, but X already promoted to queue")))
 
-  ;; THE SECOND SEAM: admin removes your song. No notification. You check your phone.
-  ;; It's gone. Did you imagine adding it?
+  ;; THE SECOND SEAM (resolved): admin removes your song → notification now surfaced.
   )
 
 
@@ -374,7 +387,8 @@
 
       (needs_interaction                       ;; browser blocked autoplay
         (ui-shows big-play-button + song-title + singer-name)
-        (detected after 1000ms timeout if player state is UNSTARTED(-1) or CUED(5))
+        (detected after 2.5s check if state is UNSTARTED(-1) or CUED(5),
+          re-check at 5s before declaring. BUFFERING(3) is acceptable)
         → playing_song (on human-clicks-play or onStateChange=PLAYING))
 
       (playing_song                            ;; video active in iframe
@@ -382,7 +396,7 @@
         (ui-shows energy-meter + floating-reactions + pinned-messages) ;; if social enabled
         → pause_screen (on video-ends via onStateChange=ENDED)
         → pause_screen (on video-errors via onError)
-        → needs_interaction (on 1s-load-timeout ;; flaky detection))
+        → needs_interaction (on 5s-load-timeout if still UNSTARTED/CUED))
 
       (pause_screen                            ;; intermission between songs
         (ui-shows up-next-singer + song-title + countdown + qr-code)
@@ -400,7 +414,7 @@
       "first sync arrives before first ping/pong. serverTimeOffset=0 uncalibrated"
       "first ~30s of first song may be slightly desynced across devices")
     (position-sync                             ;; every 10s (SYNC_CHECK_INTERVAL_MS)
-      (expected = position + (adjustedNow - startedAt) / 1000)
+      (expected = (adjustedNow - startedAt) / 1000)
       (drift-threshold 200ms SYNC_DRIFT_THRESHOLD_MS)
       (if drift > threshold → player.seekTo(targetPosition, true))
       (if player not PLAYING after seek → player.playVideo())))
@@ -418,9 +432,11 @@
     (edge
       (recap-blocks-interaction                ;; 4s of frozen UI
         "if queue advances fast, user misses seeing next state changes"
-        "can't add another song, can't vote, can't chat during recap")
+        "can't add another song, can't vote, can't chat during recap"
+        (resolved "recap overlay can be dismissed by tap"))
       (claim-modal-after-mode-switch           ;; admin switched to jukebox during song
-        "modal appears offering PIN claim. jukebox doesn't use PINs")))
+        "modal appears offering PIN claim. jukebox doesn't use PINs"
+        (resolved "claim modal suppressed in jukebox mode"))))
 
   ;; For the room (server-side):
   (advance-queue-core                          ;; doAdvanceQueueCore in room.ts. THE central mutation.
@@ -440,19 +456,20 @@
   (edge
     (pause-countdown-queue-empties             ;; admin removes all songs during 7s countdown
       "countdown continues visually. reaches zero. advance finds empty queue → idle"
-      "user sees countdown to nothing. confusing but recovers")
+      "user sees countdown to nothing. confusing but recovers"
+      (resolved "countdown cancels early when queue empties; shows 'Queue empty'"))
     (double-end-detection                      ;; extension AND iframe both detect video end
       "both trigger advance. server checks videoId match (idempotent)"
       "second advance ignored. safe but extension sends stale report")
     (network-fail-during-advance               ;; pause countdown fires, /api/next fails
       "catch block sets playerMode=idle_screen. no retry, no error toast"
-      "abrupt transition: countdown → blank idle screen")
+      "abrupt transition: countdown → blank idle screen"
+      (resolved "retry /api/next twice; on final failure show toast + idle message"))
     (sync-before-calibration                   ;; first sync before first ping/pong
       "serverTimeOffset = 0. position calculation off by network latency"))
 
-  ;; THE THIRD SEAM: the 4s celebration overlay blocks all interaction.
-  ;; Can't dismiss it. If the next song loads fast, you miss seeing who's next.
-  ;; Celebration intended as reward becomes a wall.
+  ;; THE THIRD SEAM (resolved): recap overlay can be dismissed by tap.
+  ;; Celebration stays, but the wall is gone.
   )
 
 
@@ -486,11 +503,13 @@
       (jukebox→karaoke: sortQueue. epochs reactivate))
     (edge
       (user-adds-during-switch                 ;; ~200ms window between server switch and client state
-        "user sends to old-mode endpoint. server in new mode. confusing error")
+        "user sends to old-mode endpoint. server in new mode. confusing error"
+        (resolved "client re-checks roomMode and resets add flow"))
       (mode-not-reactive-on-guest              ;; roomConfig fetched ONCE on mount via getRoomConfig()
         "admin switches mode. guest still shows old mode badge"
         "guest's add-song uses old mode logic. wrong endpoint called"
-        "FIX: listen to mode changes via WS state updates")
+        "FIX: listen to mode changes via WS state updates"
+        (resolved "configUpdated updates roomConfig live"))
       (stacks-orphaned-on-karaoke-switch       ;; personal stacks still in storage
         "UI hides MyStack component. data inaccessible until mode switches back")))
 
@@ -611,7 +630,7 @@
       socketClients                            ;; Map<WebSocket, ClientType>
       socketIdentities                         ;; Map<WebSocket, {userId, displayName}>
       extensionSockets                         ;; Set<WebSocket>
-      playbackState                            ;; {videoId, startedAt, position, playing}
+      playbackState                            ;; {videoId, startedAt, playing}
       recentReactions                          ;; Reaction[] last 30s
       chatMessages                             ;; ChatMessage[] last 100
       pinnedMessage + pinnedMessageAt + pinnedMessageTimeout
@@ -653,7 +672,7 @@
   (phone                                       ;; /{roomId} → GuestView.svelte (1135 lines)
     ;; The monolith. All state managed internally via $state runes.
     ;; identity + search + validation + queue + voting + my-stack + chat + reactions + recap
-    ;; Does NOT import room.svelte.ts store (latent: exported, never imported by GuestView))
+    )
 
   (screen                                      ;; /{roomId}/player → PlayerView.svelte
     ;; YouTube iframe + pause screen + QR code + energy meter + floating reactions + pinned messages
@@ -662,7 +681,7 @@
 
   (remote                                      ;; /{roomId}/admin → AdminView.svelte
     ;; PIN auth + mode toggle + social config + queue control + search + add
-    ;; 2s polling fallback, stops on first WS message, never resumes)
+    ;; 2s polling fallback, stops on WS connect, resumes on disconnect)
 
   (extension                                   ;; Chrome extension, Manifest V3
     ;; background.ts: service worker, WebSocket, message routing
@@ -692,29 +711,13 @@
 (latent
   ;; These are not dead code. They are intentions that never became necessary.
 
-  (branded-types                               ;; 9 constructors, none called at runtime
+  (branded-types                               ;; 9 branded ID types, aliases only
     EntryId VoterId VideoId RoomId AdminToken
     Timestamp Epoch UserId SessionId
-    "defined in types/src/index.ts. cast functions exist. no call site uses them")
-
-  (entry.sessionId                             ;; on the Entry interface, never assigned
-    "userId gets assigned in jukebox mode. sessionId never does")
-
-  (ExtensionMessage                            ;; type exists in types/
-    "extension defines its own protocol but uses ClientMessage on the wire")
-
-  (UserStack                                   ;; interface with userId + songs[]
-    "room.ts uses plain Record<string, StackedSong[]> instead")
-
-  (PlaybackState.position                      ;; set to 0, clients derive from startedAt + elapsed
-    "the field is written but never read meaningfully")
+    "defined in types/src/index.ts. type aliases only. no call site uses them")
 
   (source spotify                              ;; in the union 'youtube' | 'spotify'
-    "every createEntry and createStackedSong hardcodes 'youtube'")
-
-  (room.svelte.ts                              ;; exported runes store
-    "defined in packages/ui/src/lib/stores/room.svelte.ts"
-    "never imported by GuestView. GuestView manages its own state internally"))
+    "every createEntry and createStackedSong hardcodes 'youtube'"))
 
 
 ;; ============================================================================
@@ -723,38 +726,26 @@
 
 (platform-truth
 
-  ;; The system is half-hibernation-aware and half-not.
-  ;; It uses acceptWebSocket (correct) but not serializeAttachment (broken).
-  ;; It uses setTimeout (blocks hibernation) instead of Alarms (survives it).
-  ;; It tracks per-socket state in Maps (die on wake) instead of attachments (survive).
+  ;; The system is mostly hibernation-aware now.
+  ;; It uses acceptWebSocket + serializeAttachment, tags for broadcasts, and alarms for timers.
+  ;; Some ephemeral state remains in JS memory by design (rate limits, search cache).
 
   (websocket-attachments                       ;; ws.serializeAttachment(value) / ws.deserializeAttachment()
     ;; Arbitrary serializable data stored WITH the WebSocket connection.
     ;; Survives hibernation. Mutable (can re-serialize at any time).
-    ;; The system stores per-connection identity in Maps (socketClients, socketIdentities,
-    ;; extensionSockets). These Maps die on hibernation wake. After wake:
-    ;;   - social features silently break (no identity in Map)
-    ;;   - extension tracking lost (hasExtensionConnected returns false)
-    ;;   - targeted broadcasts fail (Map empty, no recipients)
-    ;;   - users see "Sign in to send reactions" despite being signed in
-    ;; serializeAttachment exists, survives hibernation, and is unused.)
+    ;; The system serializes clientType/userId/displayName at connect time and
+    ;; rebuilds Maps on wake, so identity survives hibernation.)
 
   (websocket-tags                              ;; up to 10 tags per socket, 256 chars each
     ;; Immutable after acceptWebSocket(). Survive hibernation.
     ;; getWebSockets(tag) returns filtered set — no need to iterate all and check Map.
-    ;; The system already sets ['type:user'] in acceptWebSocket but then ignores it:
-    ;;   broadcastToClientTypes iterates ALL sockets and checks the socketClients Map.
-    ;;   After hibernation wake, the Map is empty, so role-filtered broadcasts reach nobody.
-    ;; Tags survive and filter natively. The system sets them and doesn't use them.)
+    ;; The system tags sockets on accept and uses getWebSockets('type:...') for broadcasts.)
 
   (alarms                                      ;; ctx.storage.setAlarm(timestampMs)
     ;; One alarm per DO. Survives hibernation. At-least-once. 6 retries.
     ;; Does NOT prevent hibernation (unlike setTimeout which pins DO in memory).
-    ;; The system uses setTimeout for:
-    ;;   - pinned message expiry (8000ms)
-    ;;   - energy skip timer (song duration * 1000ms)
-    ;; These setTimeouts prevent the DO from ever hibernating.
-    ;; Rooms with social features enabled stay in memory indefinitely.)
+    ;; The system uses alarms for pinned message expiry and energy skip timers,
+    ;; allowing rooms to hibernate when idle.)
 
   (transactional-storage                       ;; state.storage.transactionSync(() => { ... })
     ;; SQLite-backed. Synchronous callback. Real transaction with rollback.
@@ -787,23 +778,23 @@
   ;; Every mutation broadcasts full state. Every advance records a performance.
   ;; Every vote is tracked. The machine knows everything.
 
-  ;; The system is mute to the person.
-  ;; No offline indicator. No removal notification. No mode-change propagation.
-  ;; No honest attribution of energy skips. The recap overlay that blocks instead of celebrates.
+  ;; The system is less mute to the person.
+  ;; Offline indicator, removal notifications, and mode-change propagation now exist.
+  ;; Energy skips are attributed. The recap overlay can be dismissed.
   ;;
   ;; WHY it's mute — not missing data, but missing connection:
   ;; The server already sends event messages (removed, skipped, advanced, energySkip).
   ;; The client already knows who "I" am (myName, session, voterId).
   ;; The gap: the client receives impersonal events but doesn't connect them to "me."
-  ;; energySkip reaches the player only. The singer never hears about it.
-  ;; removed reaches all clients, but GuestView doesn't check if the removed entry was mine.
-  ;; The information already flows. It just doesn't land.
+  ;; The information already flows. It just doesn't always land.
 
-  ;; Two remaining structural seams where the system knows something the person doesn't:
-  ;; - (connecting) "the room never tells the user whether it can hear them"
-  ;; - (walking-in) "legacy rooms: anyone at /room/admin has full control"
+  ;; Remaining seams are localized tradeoffs:
+  ;; - (waiting) promotion-during-remove (race between auto-promotion and user remove)
+  ;; - (who-decides) stacks-orphaned-on-karaoke-switch
   ;;
-  ;; Five seams resolved:
+  ;; Resolved seams include:
+  ;; - (connecting) reconnect indicator + message queueing
+  ;; - (walking-in) admin claim flow for rooms without admin
   ;; - (waiting) on-deck warning now fires on first entry at #1 or #2
   ;; - (waiting) admin song removal now notified via personalStore.handleRemoved
   ;; - (on-stage) recap overlay now dismissable by tap

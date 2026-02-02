@@ -8,6 +8,8 @@ import type {
   ChatMessage,
   EnergyState,
   RoomConfig,
+  StackedSong,
+  Entry,
 } from '@karaoke/types';
 import { getRoomId } from './api';
 
@@ -23,6 +25,8 @@ type EnergySkipHandler = () => void;
 type RemovedHandler = (entryId: string) => void;
 type ConfigUpdatedHandler = (config: RoomConfig) => void;
 type ConnectionHandler = (connected: boolean) => void;
+type StackUpdatedHandler = (userId: string, stack: StackedSong[]) => void;
+type PromotedToQueueHandler = (userId: string, entry: Entry, remainingStack: StackedSong[]) => void;
 
 // Conditional logging - only in development
 const isDev = typeof window !== 'undefined' &&
@@ -55,9 +59,12 @@ interface WebSocketManager {
   onRemoved(handler: RemovedHandler): void;
   onConfigUpdated(handler: ConfigUpdatedHandler): void;
   onConnection(handler: ConnectionHandler): void;
+  onStackUpdated(handler: StackUpdatedHandler): void;
+  onPromotedToQueue(handler: PromotedToQueueHandler): void;
   requestSync(): void;
   getServerTimeOffset(): number;
   isConnected(): boolean;
+  hasPendingMessages(): boolean;
 }
 
 export function createWebSocket(): WebSocketManager {
@@ -67,9 +74,11 @@ export function createWebSocket(): WebSocketManager {
   let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
   let heartbeatInterval: ReturnType<typeof setInterval> | null = null;
   let currentClientType: ClientType = 'user';
+  let pendingMessages: ClientMessage[] = [];
 
   const MAX_RECONNECT_DELAY = 30000;
   const BASE_RECONNECT_DELAY = 1000;
+  const MAX_PENDING_MESSAGES = 20;
 
   let stateHandler: StateHandler | null = null;
   let extensionStatusHandler: ExtensionStatusHandler | null = null;
@@ -83,6 +92,8 @@ export function createWebSocket(): WebSocketManager {
   let removedHandler: RemovedHandler | null = null;
   let configUpdatedHandler: ConfigUpdatedHandler | null = null;
   let connectionHandler: ConnectionHandler | null = null;
+  let stackUpdatedHandler: StackUpdatedHandler | null = null;
+  let promotedToQueueHandler: PromotedToQueueHandler | null = null;
 
   // Server time offset for synchronized playback (serverTime - clientTime)
   let serverTimeOffset = 0;
@@ -162,6 +173,12 @@ export function createWebSocket(): WebSocketManager {
       case 'removed':
         removedHandler?.(msg.entryId);
         break;
+      case 'stackUpdated':
+        stackUpdatedHandler?.(msg.userId, msg.stack);
+        break;
+      case 'promotedToQueue':
+        promotedToQueueHandler?.(msg.userId, msg.entry, msg.remainingStack);
+        break;
       case 'configUpdated':
         configUpdatedHandler?.(msg.config);
         break;
@@ -189,6 +206,7 @@ export function createWebSocket(): WebSocketManager {
         reconnectAttempts = 0;
         connectionHandler?.(true);
         ws!.send(JSON.stringify({ kind: 'subscribe', clientType }));
+        flushPendingMessages();
         startHeartbeat();
       };
 
@@ -236,9 +254,33 @@ export function createWebSocket(): WebSocketManager {
     connected = false;
   }
 
+  function queuePendingMessage(message: ClientMessage) {
+    pendingMessages.push(message);
+    if (pendingMessages.length > MAX_PENDING_MESSAGES) {
+      pendingMessages.shift();
+    }
+  }
+
+  function flushPendingMessages() {
+    if (!ws || !connected || pendingMessages.length === 0) return;
+    const queued = pendingMessages;
+    pendingMessages = [];
+    for (const message of queued) {
+      try {
+        ws.send(JSON.stringify(message));
+      } catch {
+        // Ignore send errors
+      }
+    }
+  }
+
   function send(message: ClientMessage) {
     if (ws && connected) {
       ws.send(JSON.stringify(message));
+      return;
+    }
+    if (message.kind === 'chat' || message.kind === 'reaction') {
+      queuePendingMessage(message);
     }
   }
 
@@ -282,6 +324,12 @@ export function createWebSocket(): WebSocketManager {
     onConnection(handler: ConnectionHandler) {
       connectionHandler = handler;
     },
+    onStackUpdated(handler: StackUpdatedHandler) {
+      stackUpdatedHandler = handler;
+    },
+    onPromotedToQueue(handler: PromotedToQueueHandler) {
+      promotedToQueueHandler = handler;
+    },
     requestSync() {
       send({ kind: 'syncRequest' });
     },
@@ -290,6 +338,9 @@ export function createWebSocket(): WebSocketManager {
     },
     isConnected() {
       return connected;
+    },
+    hasPendingMessages() {
+      return pendingMessages.length > 0;
     },
   };
 }

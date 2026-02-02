@@ -14,17 +14,6 @@ export type Epoch = Brand<number, 'Epoch'>
 export type UserId = Brand<string, 'UserId'>
 export type SessionId = Brand<string, 'SessionId'>
 
-// Type constructors (cast at boundaries, use branded types internally)
-export const EntryId = (s: string): EntryId => s as EntryId
-export const VoterId = (s: string): VoterId => s as VoterId
-export const VideoId = (s: string): VideoId => s as VideoId
-export const RoomId = (s: string): RoomId => s as RoomId
-export const AdminToken = (s: string): AdminToken => s as AdminToken
-export const Timestamp = (n: number): Timestamp => n as Timestamp
-export const Epoch = (n: number): Epoch => n as Epoch
-export const UserId = (s: string): UserId => s as UserId
-export const SessionId = (s: string): SessionId => s as SessionId
-
 // =============================================================================
 // Exhaustiveness Helper
 // =============================================================================
@@ -69,11 +58,6 @@ export interface StackedSong {
   addedAt: number                 // Timestamp when added to stack
 }
 
-export interface UserStack {
-  userId: string
-  songs: StackedSong[]            // Ordered list (first = next to promote)
-}
-
 // =============================================================================
 // Core Queue Entry
 // =============================================================================
@@ -89,7 +73,6 @@ export interface Entry {
   joinedAt: number
   // New fields for jukebox mode (optional for backwards compatibility)
   userId?: string                 // Who added it (user ID)
-  sessionId?: string              // Which session added it
 }
 
 // Queue state (extended for jukebox mode)
@@ -105,7 +88,6 @@ export interface QueueState {
 export interface PlaybackState {
   videoId: string | null
   startedAt: number       // Server timestamp (Date.now()) when playback began
-  position: number        // Position in seconds at startedAt
   playing: boolean
 }
 
@@ -277,15 +259,6 @@ export interface SearchResult {
   playable: boolean // false if embed-blocked or geo-restricted
 }
 
-// Extension WebSocket protocol
-export type ExtensionMessage =
-  | { kind: 'connected'; roomId: string }
-  | { kind: 'search'; query: string; requestId: string }
-  | { kind: 'search_result'; results: SearchResult[]; requestId: string }
-  | { kind: 'play'; videoId: string }
-  | { kind: 'ended'; videoId: string }
-  | { kind: 'error'; videoId: string; reason: string }
-
 // =============================================================================
 // API Result Types (Discriminated Unions)
 // =============================================================================
@@ -365,8 +338,16 @@ export type CreateRoomResult =
 
 // Check room existence result
 export type CheckRoomResult =
-  | { kind: 'exists'; config: RoomConfig }
+  | { kind: 'exists'; config: RoomConfig; adminConfigured: boolean }
   | { kind: 'notFound' }
+  | { kind: 'error'; message: string }
+
+// Claim room admin (legacy rooms without admin)
+export type RoomClaimResult =
+  | { kind: 'claimed'; token: string }
+  | { kind: 'alreadyClaimed' }
+  | { kind: 'roomNotFound' }
+  | { kind: 'invalidPin'; reason: string }
   | { kind: 'error'; message: string }
 
 // Admin verify result
