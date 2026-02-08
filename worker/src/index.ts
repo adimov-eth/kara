@@ -249,8 +249,9 @@ export default {
     const url = new URL(request.url)
     const path = url.pathname
     const forwardedProto = request.headers.get('X-Forwarded-Proto')
+    const isLocalhost = url.hostname === 'localhost' || url.hostname === '127.0.0.1'
 
-    if (forwardedProto === 'http' || url.protocol === 'http:') {
+    if (!isLocalhost && (forwardedProto === 'http' || url.protocol === 'http:')) {
       const httpsUrl = new URL(request.url)
       httpsUrl.protocol = 'https:'
       return addSecurityHeaders(Response.redirect(httpsUrl.toString(), 308))

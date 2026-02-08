@@ -14,8 +14,12 @@ import type {
   RoomClaimResult,
   AdminVerifyResult,
   SetConfigResult,
+  PairPlayerResult,
+  RevokePlayerResult,
+  GetPlayerStatusResult,
   RoomConfig,
   RoomMode,
+  PlaybackDriver,
   SocialConfig,
   FeedbackRequest,
   FeedbackResult,
@@ -50,8 +54,12 @@ export type {
   RoomClaimResult,
   AdminVerifyResult,
   SetConfigResult,
+  PairPlayerResult,
+  RevokePlayerResult,
+  GetPlayerStatusResult,
   RoomConfig,
   RoomMode,
+  PlaybackDriver,
   SocialConfig,
   FeedbackResult,
   GetSessionResult,
@@ -431,6 +439,31 @@ export const setRoomSocialConfig = (social: Partial<SocialConfig>): Promise<SetC
     method: 'POST',
     headers: getAdminAuthHeaders(),
     body: { social },
+  });
+
+export const setRoomPlaybackDriver = (playbackDriver: PlaybackDriver): Promise<SetConfigResult> =>
+  api('/room/config', {
+    method: 'POST',
+    headers: getAdminAuthHeaders(),
+    body: { playbackDriver },
+  });
+
+export const pairExtensionPlayer = (): Promise<PairPlayerResult> =>
+  api('/room/player/pair', {
+    method: 'POST',
+    headers: getAdminAuthHeaders(),
+  });
+
+export const revokeExtensionPlayer = (): Promise<RevokePlayerResult> =>
+  api('/room/player/revoke', {
+    method: 'POST',
+    headers: getAdminAuthHeaders(),
+  });
+
+export const getExtensionPlayerStatus = (): Promise<GetPlayerStatusResult> =>
+  api('/room/player/status', {
+    method: 'GET',
+    headers: getAdminAuthHeaders(),
   });
 
 // =============================================================================

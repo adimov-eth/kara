@@ -221,6 +221,7 @@ export interface Identity {
 // =============================================================================
 
 export type RoomMode = 'jukebox' | 'karaoke'
+export type PlaybackDriver = 'iframe' | 'extension' | 'auto'
 
 export interface RoomConfig {
   id: string              // room ID (e.g., "bobs-party")
@@ -233,6 +234,7 @@ export interface RoomConfig {
   requireAuth: boolean    // false allows anonymous users
   maxStackSize: number    // max songs in personal stack (default: 10)
   social?: SocialConfig   // social features config (optional for backwards compatibility)
+  playbackDriver?: PlaybackDriver // iframe (default), extension, or auto
 }
 
 export interface RoomAdmin {
@@ -427,6 +429,29 @@ export type SetConfigResult =
   | { kind: 'roomNotFound' }
   | { kind: 'error'; message: string }
 
+// Extension player pairing
+export type PairPlayerResult =
+  | { kind: 'paired'; token: string }
+  | { kind: 'unauthorized' }
+  | { kind: 'error'; message: string }
+
+export type RevokePlayerResult =
+  | { kind: 'revoked' }
+  | { kind: 'unauthorized' }
+  | { kind: 'error'; message: string }
+
+export interface ExtensionPlayerStatus {
+  connected: boolean
+  playbackDriver: PlaybackDriver
+  lastSeenAt: number | null
+  clientVersion: string | null
+}
+
+export type GetPlayerStatusResult =
+  | { kind: 'status'; status: ExtensionPlayerStatus }
+  | { kind: 'unauthorized' }
+  | { kind: 'error'; message: string }
+
 // =============================================================================
 // API Request Types
 // =============================================================================
@@ -473,6 +498,7 @@ export type ClientType = 'user' | 'player' | 'admin' | 'extension'
 // Server -> Client messages
 export type ServerMessage =
   | { kind: 'state'; state: QueueState; playback?: PlaybackState; extensionConnected?: boolean }
+  | { kind: 'extensionAuthorized' }
   | { kind: 'error'; message: string }
   | { kind: 'joined'; entry: Entry; position: number }
   | { kind: 'removed'; entryId: string }
@@ -496,7 +522,7 @@ export type ServerMessage =
 
 // Client -> Server messages
 export type ClientMessage =
-  | { kind: 'subscribe'; clientType: ClientType; sessionToken?: string }
+  | { kind: 'subscribe'; clientType: ClientType; sessionToken?: string; playerToken?: string; clientVersion?: string }
   | { kind: 'join'; name: string; videoId: string; title: string }
   | { kind: 'vote'; entryId: string; direction: 1 | -1 | 0; voterId: string }
   | { kind: 'remove'; entryId: string; userName?: string; isAdmin?: boolean }
@@ -505,8 +531,8 @@ export type ClientMessage =
   | { kind: 'reorder'; entryId: string; newPosition?: number; newEpoch?: number }
   | { kind: 'adminAdd'; name: string; videoId: string; title: string }
   | { kind: 'ping'; clientTime?: number }
-  | { kind: 'ended'; videoId: string } // Extension reports video end
-  | { kind: 'error'; videoId: string; reason: string } // Extension reports video error
+  | { kind: 'ended'; videoId: string; entryId?: string } // Extension reports video end
+  | { kind: 'error'; videoId: string; reason: string; entryId?: string } // Extension reports video error
   | { kind: 'syncRequest' } // Request current playback state for sync
   // Jukebox mode additions
   | { kind: 'addSong'; videoId: string; title: string; sessionToken: string }

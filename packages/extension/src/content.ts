@@ -2,10 +2,22 @@ import type { QueueState } from '@karaoke/types'
 import type { BackgroundToContent, ContentToBackground } from './types.js'
 
 let currentVideoId: string | null = null
+let currentEntryId: string | null = null
 let video: HTMLVideoElement | null = null
 let queueState: QueueState | null = null
+let joinUrl: string | null = null
+let roomId: string | null = null
+let connected = false
 let endCheckInterval: number | null = null
 let hasReportedEnd = false
+
+let overlayRoot: HTMLDivElement | null = null
+let overlayTitle: HTMLDivElement | null = null
+let overlaySinger: HTMLDivElement | null = null
+let overlayRoom: HTMLDivElement | null = null
+let overlayStatus: HTMLDivElement | null = null
+let overlayQr: HTMLImageElement | null = null
+let autoplayButton: HTMLButtonElement | null = null
 
 function getVideoIdFromUrl(): string | null {
   try {
@@ -25,17 +37,21 @@ function sendToBackground(message: ContentToBackground): void {
 function handleMessage(msg: BackgroundToContent): void {
   switch (msg.type) {
     case 'play':
-      playVideo(msg.videoId)
+      playVideo(msg.videoId, msg.entryId)
       break
 
     case 'state':
       queueState = msg.state
+      joinUrl = msg.joinUrl
+      roomId = msg.roomId
+      connected = msg.connected
+      updateOverlay()
       verifyCurrentVideo()
       break
   }
 }
 
-function playVideo(videoId: string): void {
+function playVideo(videoId: string, entryId?: string): void {
   const currentUrlVideoId = getVideoIdFromUrl()
 
   if (currentUrlVideoId !== videoId) {
@@ -44,12 +60,12 @@ function playVideo(videoId: string): void {
   }
 
   currentVideoId = videoId
+  currentEntryId = entryId ?? null
   hasReportedEnd = false
   setupEndDetection()
 }
 
 function setupEndDetection(): void {
-  // Clear any existing interval
   if (endCheckInterval) {
     clearInterval(endCheckInterval)
     endCheckInterval = null
@@ -58,31 +74,38 @@ function setupEndDetection(): void {
   video = document.querySelector('video')
   if (!video) {
     console.log('[Karaoke] Video element not found, will retry')
-    // Retry after a short delay
     setTimeout(setupEndDetection, 1000)
     return
   }
 
   console.log('[Karaoke] Setting up end detection for video')
 
-  // Strategy 1: onended event
   video.onended = () => {
     console.log('[Karaoke] Video ended (onended event)')
     handleVideoEnd()
   }
 
-  // Strategy 2: Polling near end
   endCheckInterval = window.setInterval(() => {
     if (!video || hasReportedEnd) return
 
     const { currentTime, duration } = video
-
-    // Check if we're near the end (within 0.5 seconds) and duration is valid
     if (duration > 0 && currentTime >= duration - 0.5) {
       console.log('[Karaoke] Video ended (polling detection)')
       handleVideoEnd()
     }
   }, 500)
+
+  tryPlay()
+}
+
+async function tryPlay(): Promise<void> {
+  if (!video) return
+  try {
+    await video.play()
+    hideAutoplayPrompt()
+  } catch {
+    showAutoplayPrompt()
+  }
 }
 
 function handleVideoEnd(): void {
@@ -90,32 +113,17 @@ function handleVideoEnd(): void {
 
   hasReportedEnd = true
   const endedVideoId = currentVideoId
+  const endedEntryId = currentEntryId ?? undefined
 
-  // Clear the interval
   if (endCheckInterval) {
     clearInterval(endCheckInterval)
     endCheckInterval = null
   }
 
-  // 1. Optimistic: navigate to next video immediately
-  const nextVideoId = getNextFromQueue()
-  if (nextVideoId) {
-    console.log('[Karaoke] Optimistically playing next video:', nextVideoId)
-    playVideo(nextVideoId)
-  }
-
-  // 2. Report to server (will confirm or correct)
-  sendToBackground({ type: 'videoEnded', videoId: endedVideoId })
-}
-
-function getNextFromQueue(): string | null {
-  if (!queueState || queueState.queue.length === 0) return null
-  const next = queueState.queue[0]
-  return next?.videoId ?? null
+  sendToBackground({ type: 'videoEnded', videoId: endedVideoId, entryId: endedEntryId })
 }
 
 function verifyCurrentVideo(): void {
-  // Server sent new state - verify we're playing the right video
   if (!queueState?.nowPlaying) return
 
   const expectedVideoId = queueState.nowPlaying.videoId
@@ -123,8 +131,7 @@ function verifyCurrentVideo(): void {
 
   if (expectedVideoId && expectedVideoId !== actualVideoId) {
     console.log('[Karaoke] Video mismatch, navigating to correct video')
-    console.log('[Karaoke] Expected:', expectedVideoId, 'Actual:', actualVideoId)
-    playVideo(expectedVideoId)
+    playVideo(expectedVideoId, queueState.nowPlaying.id)
   }
 }
 
@@ -141,25 +148,159 @@ function observeVideoElement(): void {
   observer.observe(document.body, { childList: true, subtree: true })
 }
 
-// Listen for messages from background
+function ensureOverlay(): void {
+  if (overlayRoot) return
+
+  const style = document.createElement('style')
+  style.textContent = `
+    #karaoke-overlay {
+      position: fixed;
+      top: 16px;
+      right: 16px;
+      z-index: 2147483647;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      color: #f0f0f5;
+      pointer-events: none;
+    }
+    #karaoke-overlay .panel {
+      background: rgba(10, 10, 15, 0.85);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 12px;
+      padding: 12px 14px;
+      width: 260px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+    }
+    #karaoke-overlay .title {
+      font-size: 0.95rem;
+      font-weight: 600;
+      margin-bottom: 4px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    #karaoke-overlay .singer {
+      font-size: 0.8rem;
+      color: rgba(240, 240, 245, 0.7);
+      margin-bottom: 8px;
+    }
+    #karaoke-overlay .room {
+      font-size: 0.75rem;
+      color: rgba(240, 240, 245, 0.7);
+      margin-bottom: 6px;
+    }
+    #karaoke-overlay .status {
+      font-size: 0.75rem;
+      color: rgba(240, 240, 245, 0.7);
+    }
+    #karaoke-overlay img.qr {
+      width: 120px;
+      height: 120px;
+      border-radius: 8px;
+      background: #fff;
+      padding: 4px;
+      margin-top: 8px;
+    }
+    #karaoke-autoplay {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(255, 107, 157, 0.95);
+      color: #0a0a0f;
+      border: none;
+      border-radius: 999px;
+      padding: 12px 18px;
+      font-size: 0.9rem;
+      font-weight: 700;
+      cursor: pointer;
+      z-index: 2147483647;
+      pointer-events: auto;
+      display: none;
+    }
+  `
+  document.head.appendChild(style)
+
+  overlayRoot = document.createElement('div')
+  overlayRoot.id = 'karaoke-overlay'
+
+  const panel = document.createElement('div')
+  panel.className = 'panel'
+
+  overlayTitle = document.createElement('div')
+  overlayTitle.className = 'title'
+
+  overlaySinger = document.createElement('div')
+  overlaySinger.className = 'singer'
+
+  overlayRoom = document.createElement('div')
+  overlayRoom.className = 'room'
+
+  overlayStatus = document.createElement('div')
+  overlayStatus.className = 'status'
+
+  overlayQr = document.createElement('img')
+  overlayQr.className = 'qr'
+
+  panel.appendChild(overlayTitle)
+  panel.appendChild(overlaySinger)
+  panel.appendChild(overlayRoom)
+  panel.appendChild(overlayStatus)
+  panel.appendChild(overlayQr)
+  overlayRoot.appendChild(panel)
+  document.body.appendChild(overlayRoot)
+
+  autoplayButton = document.createElement('button')
+  autoplayButton.id = 'karaoke-autoplay'
+  autoplayButton.textContent = 'Click to start playback'
+  autoplayButton.addEventListener('click', () => {
+    hideAutoplayPrompt()
+    tryPlay()
+  })
+  document.body.appendChild(autoplayButton)
+}
+
+function updateOverlay(): void {
+  ensureOverlay()
+  if (!overlayTitle || !overlaySinger || !overlayRoom || !overlayStatus || !overlayQr) return
+
+  const nowPlaying = queueState?.nowPlaying
+  overlayTitle.textContent = nowPlaying?.title ?? 'Nothing playing'
+  overlaySinger.textContent = nowPlaying?.name ?? ''
+  overlayRoom.textContent = roomId ? `Room: ${roomId}` : 'Room: -'
+  overlayStatus.textContent = connected ? 'Connected' : 'Offline'
+
+  if (joinUrl) {
+    const qrSrc = `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(joinUrl)}&bgcolor=0a0a0f&color=ffffff`
+    overlayQr.src = qrSrc
+    overlayQr.style.display = 'block'
+  } else {
+    overlayQr.style.display = 'none'
+  }
+}
+
+function showAutoplayPrompt(): void {
+  ensureOverlay()
+  if (autoplayButton) autoplayButton.style.display = 'block'
+}
+
+function hideAutoplayPrompt(): void {
+  if (autoplayButton) autoplayButton.style.display = 'none'
+}
+
 chrome.runtime.onMessage.addListener((msg: BackgroundToContent, _sender, sendResponse) => {
   handleMessage(msg)
   sendResponse({ ok: true })
   return true
 })
 
-// Initialize
 console.log('[Karaoke] Content script loaded')
 
-// Start observing for video elements
 observeVideoElement()
 
-// If we're already on a video page, set up end detection
 const initialVideoId = getVideoIdFromUrl()
 if (initialVideoId) {
   currentVideoId = initialVideoId
   setupEndDetection()
 }
 
-// Notify background that we're ready
 sendToBackground({ type: 'ready' })

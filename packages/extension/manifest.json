@@ -3,10 +3,12 @@
   "name": "Karaoke Queue",
   "version": "0.1.0",
   "description": "Venue display controller for Karaoke Queue",
-  "permissions": ["storage", "alarms"],
+  "permissions": ["storage", "alarms", "tabs"],
   "host_permissions": [
     "https://www.youtube.com/*",
-    "wss://karaoke-queue.boris-47d.workers.dev/*"
+    "https://*.workers.dev/*",
+    "https://localhost:*/*",
+    "http://localhost:*/*"
   ],
   "background": {
     "service_worker": "background.js",

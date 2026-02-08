@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=300, initial-scale=1.0">
+  <meta name="viewport" content="width=320, initial-scale=1.0">
   <title>Karaoke Queue</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -15,12 +15,13 @@
       --text-muted: #6b6b80;
       --success: #7bed9f;
       --warning: #ffa502;
+      --danger: #ff4757;
     }
     body {
       font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
       background: var(--bg-deep);
       color: var(--text);
-      width: 300px;
+      width: 320px;
       padding: 16px;
     }
     h1 {
@@ -32,14 +33,17 @@
       background-clip: text;
       margin-bottom: 16px;
     }
+    .card {
+      padding: 12px;
+      border-radius: 8px;
+      background: var(--bg-card);
+      border: 1px solid rgba(255, 107, 157, 0.2);
+      margin-bottom: 12px;
+    }
     .status {
       display: flex;
       align-items: center;
       gap: 8px;
-      padding: 12px;
-      border-radius: 8px;
-      background: var(--bg-card);
-      margin-bottom: 12px;
     }
     .status-dot {
       width: 10px;
@@ -58,19 +62,55 @@
     .status-text {
       font-size: 0.9rem;
     }
-    .now-playing {
-      padding: 12px;
-      border-radius: 8px;
-      background: var(--bg-card);
-      border: 1px solid rgba(255, 107, 157, 0.3);
-    }
-    .now-playing-label {
+    label {
       font-size: 0.75rem;
-      color: var(--accent);
-      font-weight: 600;
       text-transform: uppercase;
-      letter-spacing: 0.05em;
-      margin-bottom: 8px;
+      letter-spacing: 0.04em;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+      display: block;
+    }
+    input {
+      width: 100%;
+      border-radius: 6px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: #0f0f16;
+      color: var(--text);
+      padding: 8px 10px;
+      margin-bottom: 10px;
+      font-size: 0.85rem;
+    }
+    .btn-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .btn {
+      border: none;
+      border-radius: 6px;
+      padding: 8px 10px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      color: #0a0a0f;
+    }
+    .btn-primary {
+      background: var(--cyan);
+    }
+    .btn-secondary {
+      background: var(--accent);
+    }
+    .btn-ghost {
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--text);
+    }
+    .btn-full {
+      width: 100%;
+      margin-top: 8px;
+    }
+    .now-playing {
+      margin-top: 8px;
     }
     .now-playing-title {
       font-size: 0.95rem;
@@ -84,37 +124,54 @@
       font-size: 0.85rem;
       color: var(--text-muted);
     }
-    .empty {
-      color: var(--text-muted);
-      font-style: italic;
-    }
     .queue-count {
       font-size: 0.85rem;
       color: var(--text-muted);
-      margin-top: 12px;
       text-align: center;
+      margin-top: 8px;
+    }
+    .error {
+      color: var(--danger);
+      font-size: 0.8rem;
+      margin-top: 6px;
     }
   </style>
 </head>
 <body>
   <h1>Karaoke Queue</h1>
 
-  <div class="status">
+  <div class="card status">
     <div class="status-dot disconnected" id="statusDot"></div>
-    <span class="status-text" id="statusText">Connecting...</span>
+    <span class="status-text" id="statusText">Disconnected</span>
   </div>
 
-  <div class="now-playing" id="nowPlayingCard" style="display: none;">
-    <div class="now-playing-label">Now Playing</div>
+  <div class="card">
+    <label for="serverOrigin">Server Origin</label>
+    <input id="serverOrigin" type="text" placeholder="https://karaoke-queue.boris-47d.workers.dev" />
+
+    <label for="roomId">Room ID</label>
+    <input id="roomId" type="text" placeholder="default" />
+
+    <label for="playerToken">Player Token</label>
+    <input id="playerToken" type="text" placeholder="Paste token from Admin" />
+
+    <div class="btn-row">
+      <button class="btn btn-primary" id="saveBtn">Save</button>
+      <button class="btn btn-secondary" id="connectBtn">Connect</button>
+    </div>
+    <button class="btn btn-ghost btn-full" id="openTabBtn">Open YouTube Tab</button>
+
+    <div class="error" id="errorText" style="display: none;"></div>
+  </div>
+
+  <div class="card now-playing" id="nowPlayingCard" style="display: none;">
     <div class="now-playing-title" id="nowPlayingTitle"></div>
     <div class="now-playing-singer" id="nowPlayingSinger"></div>
   </div>
 
-  <div class="now-playing" id="emptyCard">
-    <p class="empty">No song playing</p>
+  <div class="card" id="emptyCard">
+    <p class="queue-count" id="queueCount">No song playing</p>
   </div>
-
-  <p class="queue-count" id="queueCount"></p>
 
   <script src="popup.js" type="module"></script>
 </body>

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import type { QueueState, SearchResult, RoomConfig, RoomMode, SocialConfig } from '@karaoke/types';
+  import type { QueueState, SearchResult, RoomConfig, RoomMode, PlaybackDriver, SocialConfig } from '@karaoke/types';
   import { DEFAULT_SOCIAL_CONFIG } from '@karaoke/types';
   import {
     createWebSocket,
@@ -18,6 +18,10 @@
     getRoomConfig,
     setRoomMode,
     setRoomSocialConfig,
+    setRoomPlaybackDriver,
+    pairExtensionPlayer,
+    revokeExtensionPlayer,
+    getExtensionPlayerStatus,
     checkRoom,
     claimRoom,
     join,
@@ -42,8 +46,17 @@
   let room = $state<QueueState>({ queue: [], nowPlaying: null, currentEpoch: 0 });
   let roomConfig = $state<RoomConfig | null>(null);
   let isChangingMode = $state(false);
+  let playbackDriver = $state<PlaybackDriver>('iframe');
+  let isChangingPlaybackDriver = $state(false);
   let socialConfig = $state<SocialConfig>({ ...DEFAULT_SOCIAL_CONFIG });
   let isUpdatingSocial = $state(false);
+  let extensionConnected = $state(false);
+  let extensionLastSeenAt = $state<number | null>(null);
+  let extensionClientVersion = $state<string | null>(null);
+  let playerToken = $state<string | null>(null);
+  let isPairingPlayer = $state(false);
+  let isRevokingPlayer = $state(false);
+  let playerPairError = $state('');
 
   // Add form
   let addName = $state('');
@@ -65,6 +78,7 @@
   // WebSocket
   let ws = createWebSocket();
   let pollInterval: ReturnType<typeof setInterval> | null = null;
+  let playerStatusPollInterval: ReturnType<typeof setInterval> | null = null;
 
   function startPolling() {
     if (pollInterval) return;
@@ -78,6 +92,13 @@
     if (pollInterval) {
       clearInterval(pollInterval);
       pollInterval = null;
+    }
+  }
+
+  function stopPlayerStatusPolling() {
+    if (playerStatusPollInterval) {
+      clearInterval(playerStatusPollInterval);
+      playerStatusPollInterval = null;
     }
   }
 
@@ -112,6 +133,7 @@
   onDestroy(() => {
     ws.disconnect();
     stopPolling();
+    stopPlayerStatusPolling();
     if (connectionFlashTimeout) {
       clearTimeout(connectionFlashTimeout);
       connectionFlashTimeout = null;
@@ -121,6 +143,7 @@
   $effect(() => {
     if (roomConfig) {
       socialConfig = { ...DEFAULT_SOCIAL_CONFIG, ...(roomConfig.social ?? {}) };
+      playbackDriver = roomConfig.playbackDriver ?? 'iframe';
     }
   });
 
@@ -151,9 +174,17 @@
   }
 
   async function initializeAdmin() {
-    ws.onState((newState) => {
+    ws.onState((newState, _playback, extConnected) => {
       room = newState;
+      if (typeof extConnected === 'boolean') {
+        extensionConnected = extConnected;
+      }
       stopPolling();
+    });
+
+    ws.onExtensionStatus((connected) => {
+      extensionConnected = connected;
+      refreshPlayerStatus();
     });
 
     ws.onConfigUpdated((config) => {
@@ -188,6 +219,28 @@
 
     // Fetch room config for mode display
     roomConfig = await getRoomConfig();
+    await refreshPlayerStatus();
+    if (!playerStatusPollInterval) {
+      playerStatusPollInterval = setInterval(() => {
+        refreshPlayerStatus();
+      }, 10000);
+    }
+  }
+
+  async function refreshPlayerStatus() {
+    const result = await getExtensionPlayerStatus();
+    if (result.kind === 'status') {
+      extensionConnected = result.status.connected;
+      extensionLastSeenAt = result.status.lastSeenAt;
+      extensionClientVersion = result.status.clientVersion;
+    } else if (result.kind === 'unauthorized') {
+      handleLogout();
+    }
+  }
+
+  function formatLastSeen(ts: number | null): string {
+    if (!ts) return 'Never';
+    return new Date(ts).toLocaleString();
   }
 
   async function handlePinSubmit() {
@@ -261,6 +314,7 @@
     isAuthenticated = false;
     ws.disconnect();
     stopPolling();
+    stopPlayerStatusPolling();
     pinInput = '';
     pinConfirm = '';
     authError = '';
@@ -272,6 +326,9 @@
       connectionFlashTimeout = null;
     }
     room = { queue: [], nowPlaying: null, currentEpoch: 0 };
+    extensionConnected = false;
+    extensionLastSeenAt = null;
+    extensionClientVersion = null;
   }
 
   function handlePinKeydown(e: KeyboardEvent) {
@@ -453,6 +510,69 @@
     }
   }
 
+  async function handlePlaybackDriverChange(driver: PlaybackDriver) {
+    if (!roomConfig || isChangingPlaybackDriver) return;
+    if (driver === playbackDriver) return;
+
+    isChangingPlaybackDriver = true;
+    const result = await setRoomPlaybackDriver(driver);
+    isChangingPlaybackDriver = false;
+
+    if (result.kind === 'updated') {
+      roomConfig = result.config;
+      toastStore.success('Playback driver updated');
+    } else {
+      const errorMsg = result.kind === 'error' ? result.message : 'Failed to change playback driver';
+      toastStore.error(errorMsg);
+    }
+  }
+
+  async function handlePairPlayer() {
+    if (isPairingPlayer) return;
+    isPairingPlayer = true;
+    playerPairError = '';
+
+    const result = await pairExtensionPlayer();
+    isPairingPlayer = false;
+
+    if (result.kind === 'paired') {
+      playerToken = result.token;
+      refreshPlayerStatus();
+      toastStore.success('Player token generated');
+    } else {
+      playerPairError = result.kind === 'error' ? result.message : 'Failed to generate token';
+      toastStore.error(playerPairError);
+    }
+  }
+
+  async function handleRevokePlayer() {
+    if (isRevokingPlayer) return;
+    isRevokingPlayer = true;
+    playerPairError = '';
+
+    const result = await revokeExtensionPlayer();
+    isRevokingPlayer = false;
+
+    if (result.kind === 'revoked') {
+      playerToken = null;
+      refreshPlayerStatus();
+      toastStore.success('Player token revoked');
+    } else {
+      playerPairError = result.kind === 'error' ? result.message : 'Failed to revoke token';
+      toastStore.error(playerPairError);
+    }
+  }
+
+  async function copyToken() {
+    if (!playerToken) return;
+    try {
+      await navigator.clipboard.writeText(playerToken);
+      toastStore.success('Token copied');
+    } catch {
+      toastStore.error('Failed to copy token');
+    }
+  }
+
   async function updateSocialConfig(patch: Partial<SocialConfig>) {
     if (!roomConfig || isUpdatingSocial) return;
 
@@ -618,7 +738,7 @@
 
     <!-- Mode Toggle -->
     {#if roomConfig}
-      <div class="mode-card">
+      <div class="mode-card playback-card">
         <div class="mode-info">
           <span class="mode-label">Queue Mode</span>
           <span class="mode-badge" class:jukebox={roomConfig.mode === 'jukebox'} class:karaoke={roomConfig.mode === 'karaoke'}>
@@ -632,6 +752,73 @@
         >
           {isChangingMode ? 'Switching...' : `Switch to ${roomConfig.mode === 'jukebox' ? 'Karaoke' : 'Jukebox'}`}
         </button>
+      </div>
+
+      <div class="mode-card playback-card">
+        <div class="mode-info">
+          <span class="mode-label">Playback Driver</span>
+          <span class="mode-badge">{playbackDriver === 'iframe' ? 'Iframe' : playbackDriver === 'auto' ? 'Auto' : 'Extension'}</span>
+        </div>
+        <div class="driver-buttons">
+          <button
+            class="btn btn-mode"
+            class:active={playbackDriver === 'iframe'}
+            onclick={() => handlePlaybackDriverChange('iframe')}
+            disabled={isChangingPlaybackDriver}
+          >
+            Iframe
+          </button>
+          <button
+            class="btn btn-mode"
+            class:active={playbackDriver === 'auto'}
+            onclick={() => handlePlaybackDriverChange('auto')}
+            disabled={isChangingPlaybackDriver}
+          >
+            Auto
+          </button>
+          <button
+            class="btn btn-mode"
+            class:active={playbackDriver === 'extension'}
+            onclick={() => handlePlaybackDriverChange('extension')}
+            disabled={isChangingPlaybackDriver}
+          >
+            Extension
+          </button>
+        </div>
+      </div>
+
+      <div class="mode-card">
+        <div class="mode-info">
+          <span class="mode-label">Extension Player</span>
+          <span class="mode-badge" class:connected={extensionConnected} class:offline={!extensionConnected}>
+            {extensionConnected ? 'Connected' : 'Offline'}
+          </span>
+        </div>
+        <div class="token-row">
+          <input
+            class="token-input"
+            type="text"
+            readonly
+            value={playerToken ?? ''}
+            placeholder="Generate a token to pair"
+          />
+          <button class="btn btn-token" onclick={copyToken} disabled={!playerToken}>Copy</button>
+        </div>
+        <div class="driver-buttons">
+          <button class="btn btn-mode" onclick={handlePairPlayer} disabled={isPairingPlayer}>
+            {isPairingPlayer ? 'Generating...' : 'Generate Token'}
+          </button>
+          <button class="btn btn-mode" onclick={handleRevokePlayer} disabled={isRevokingPlayer}>
+            {isRevokingPlayer ? 'Revoking...' : 'Revoke'}
+          </button>
+        </div>
+        <div class="player-status-meta">
+          <div>Version: {extensionClientVersion ?? '-'}</div>
+          <div>Last seen: {formatLastSeen(extensionLastSeenAt)}</div>
+        </div>
+        {#if playerPairError}
+          <div class="error-msg">{playerPairError}</div>
+        {/if}
       </div>
 
       <div class="social-card">
@@ -1035,6 +1222,12 @@
     border: 1px solid rgba(255, 255, 255, 0.05);
   }
 
+  .mode-card.playback-card {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+
   .social-card {
     background: var(--bg-card);
     border-radius: 16px;
@@ -1159,6 +1352,18 @@
     border: 1px solid rgba(255, 107, 157, 0.3);
   }
 
+  .mode-badge.connected {
+    background: rgba(123, 237, 159, 0.2);
+    color: #7bed9f;
+    border: 1px solid rgba(123, 237, 159, 0.3);
+  }
+
+  .mode-badge.offline {
+    background: rgba(255, 165, 2, 0.2);
+    color: #ffa502;
+    border: 1px solid rgba(255, 165, 2, 0.3);
+  }
+
   .btn-mode {
     padding: 8px 16px;
     font-size: 0.85rem;
@@ -1166,6 +1371,45 @@
     border: 1px solid rgba(255, 255, 255, 0.2);
     color: var(--text);
     width: auto;
+  }
+
+  .btn-mode.active {
+    background: rgba(255, 255, 255, 0.18);
+  }
+
+  .driver-buttons {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .token-row {
+    display: flex;
+    gap: 8px;
+    width: 100%;
+    align-items: center;
+  }
+
+  .token-input {
+    flex: 1;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 8px;
+    padding: 8px 10px;
+    color: var(--text);
+    font-size: 0.85rem;
+  }
+
+  .btn-token {
+    padding: 8px 12px;
+  }
+
+  .player-status-meta {
+    display: grid;
+    gap: 4px;
+    width: 100%;
+    font-size: 0.8rem;
+    color: var(--text-muted);
   }
 
   .btn-mode:hover:not(:disabled) {

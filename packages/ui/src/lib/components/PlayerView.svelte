@@ -1,10 +1,21 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import type { QueueState, Entry, PlaybackState, SearchResult, Reaction, ChatMessage, EnergyState } from '@karaoke/types';
+  import type {
+    QueueState,
+    Entry,
+    PlaybackState,
+    SearchResult,
+    Reaction,
+    ChatMessage,
+    EnergyState,
+    RoomConfig,
+    PlaybackDriver,
+  } from '@karaoke/types';
   import {
     createWebSocket,
     getState,
     getRoomId,
+    getRoomConfig,
     search as searchApi,
     join,
     adminSkip,
@@ -28,7 +39,9 @@
   const SYNC_CHECK_INTERVAL_MS = 10000; // Check sync every 10 seconds
 
   let room = $state<QueueState>({ queue: [], nowPlaying: null, currentEpoch: 0 });
+  let roomConfig = $state<RoomConfig | null>(null);
   let wsConnected = $state(false);
+  let extensionConnected = $state(false);
   let roomId = $state('');
   let idleMessage = $state<string | null>(null);
 
@@ -90,6 +103,10 @@
 
   // Derived
   const upNext = $derived(room.queue.slice(0, 5));
+  function extensionPlaybackActive(): boolean {
+    const driver: PlaybackDriver = roomConfig?.playbackDriver ?? 'iframe';
+    return driver === 'extension' || (driver === 'auto' && extensionConnected);
+  }
   const qrUrl = $derived(
     typeof window === 'undefined'
       ? ''
@@ -111,7 +128,10 @@
       isAdminMode = true;
     }
 
-    ws.onState((newState, playback) => {
+    ws.onState((newState, playback, extConnected) => {
+      if (typeof extConnected === 'boolean') {
+        extensionConnected = extConnected;
+      }
       handleStateUpdate(newState);
 
       // Handle initial playback state from state message
@@ -164,6 +184,14 @@
       toastStore.info('Energy dipped - skipping');
     });
 
+    ws.onExtensionStatus((connected) => {
+      extensionConnected = connected;
+    });
+
+    ws.onConfigUpdated((config) => {
+      roomConfig = config;
+    });
+
     ws.onConnection((connected) => {
       wsConnected = connected;
       if (connected) {
@@ -185,7 +213,28 @@
       }
     }, 2000);
 
-    // Load YouTube API
+    getRoomConfig().then((config) => {
+      roomConfig = config;
+    });
+
+    // Start periodic sync check
+    startSyncCheck();
+
+    // Request sync when tab becomes visible (user returns to page)
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+    }
+  });
+
+  $effect(() => {
+    if (extensionPlaybackActive()) {
+      clearTimers();
+      playerMode = 'idle_screen';
+      player?.pauseVideo();
+      return;
+    }
+
+    // Load YouTube API only when iframe playback is active
     if (typeof window !== 'undefined') {
       window.onYouTubeIframeAPIReady = initPlayer;
       if (!window.YT) {
@@ -195,14 +244,6 @@
       } else if (window.YT.Player) {
         initPlayer();
       }
-    }
-
-    // Start periodic sync check
-    startSyncCheck();
-
-    // Request sync when tab becomes visible (user returns to page)
-    if (typeof document !== 'undefined') {
-      document.addEventListener('visibilitychange', handleVisibilityChange);
     }
   });
 
@@ -247,6 +288,10 @@
   function handleSync(playback: PlaybackState, serverTimeOffset: number) {
     lastSyncPlayback = playback;
 
+    if (extensionPlaybackActive()) {
+      return;
+    }
+
     if (!playback.playing || !playback.videoId || !player || !playerReady) {
       return;
     }
@@ -289,6 +334,10 @@
       idleMessage = null;
     }
 
+    if (extensionPlaybackActive()) {
+      return;
+    }
+
     // Auto-start if queue has songs but nothing playing
     if (!room.nowPlaying && room.queue.length > 0 && !isAdvancing) {
       advanceToNext();
@@ -312,6 +361,8 @@
   }
 
   function initPlayer() {
+    if (extensionPlaybackActive()) return;
+    if (player) return;
     if (!window.YT) return;
 
     // Create player - it will be hidden until a song plays
@@ -364,6 +415,7 @@
   }
 
   function loadSong(entry: Entry) {
+    if (extensionPlaybackActive()) return;
     if (!entry || !playerReady || !entry.videoId) return;
     clearTimers();
     currentVideoId = entry.videoId;
@@ -451,6 +503,7 @@
   }
 
   async function advanceToNext() {
+    if (extensionPlaybackActive()) return;
     if (isAdvancing) return;
     isAdvancing = true;
     clearTimers();
@@ -688,76 +741,91 @@
 </script>
 
 <div class="player-container">
-  {#if !wsConnected}
-    <div class="connection-indicator" aria-label="Reconnecting" title="Reconnecting...">
-      <span class="connection-dot"></span>
-    </div>
-  {/if}
-
-  {#if energyState}
-    <EnergyMeter energyState={energyState} />
-  {/if}
-
-  <ReactionOverlay items={floatingReactions} />
-  <PinnedMessage message={pinnedMessage} />
-
-  <!-- YouTube Player (hidden during pause/idle) -->
-  <div class="video-wrapper" class:hidden={playerMode !== 'playing_song'}>
-    <div id="yt-player"></div>
-  </div>
-
-  <!-- Pause Screen: Between songs -->
-  {#if playerMode === 'pause_screen'}
-    <div class="overlay pause-overlay">
-      <div class="pause-content">
-        {#if room.queue.length > 0}
-          <div class="up-next-label">UP NEXT</div>
-          <div class="next-singer">{room.queue[0]?.name}</div>
-          <div class="next-song">{room.queue[0]?.title}</div>
-          <div class="countdown">{countdown}</div>
-        {:else}
-          <div class="waiting-message">Queue empty</div>
-        {/if}
-      </div>
-
-      {#if room.queue.length > 1}
-        <div class="queue-preview">
-          <div class="queue-label">Coming up</div>
-          {#each room.queue.slice(1, 4) as entry, i (entry.id)}
-            <div class="queue-item">
-              <span class="queue-position">{i + 2}</span>
-              <span class="queue-name">{entry.name}</span>
-              <span class="queue-song">{entry.title}</span>
-            </div>
-          {/each}
-        </div>
-      {/if}
-
-      <div class="qr-section">
-        <img src={qrUrl} alt="Join queue" class="qr-code" />
-        <div class="qr-hint">Scan to add songs</div>
-      </div>
-    </div>
-  {/if}
-
-  <!-- Needs Interaction: Browser blocked autoplay -->
-  {#if playerMode === 'needs_interaction'}
-    <button class="overlay start-overlay" onclick={handleStartClick}>
-      <div class="start-content">
-        <div class="start-icon">▶</div>
-        <div class="start-title">Click to Start</div>
-        {#if room.nowPlaying}
-          <div class="start-song">{room.nowPlaying.title}</div>
-          <div class="start-singer">{room.nowPlaying.name}</div>
-        {/if}
-      </div>
-    </button>
-  {/if}
-
-  <!-- Idle Screen: No songs in queue -->
-  {#if playerMode === 'idle_screen'}
+  {#if extensionPlaybackActive()}
     <div class="overlay idle-overlay">
       <div class="idle-content">
+        <div class="idle-title">Extension Playback Enabled</div>
+        <div class="idle-message">Open the YouTube tab from the extension popup.</div>
+        <div class="idle-message">
+          Extension status: {extensionConnected ? 'Connected' : 'Offline'}
+        </div>
+        <div class="qr-section">
+          <img src={qrUrl} alt="Join queue" class="qr-code" />
+          <div class="qr-hint">Scan to add songs</div>
+        </div>
+      </div>
+    </div>
+  {:else}
+    {#if !wsConnected}
+      <div class="connection-indicator" aria-label="Reconnecting" title="Reconnecting...">
+        <span class="connection-dot"></span>
+      </div>
+    {/if}
+
+    {#if energyState}
+      <EnergyMeter energyState={energyState} />
+    {/if}
+
+    <ReactionOverlay items={floatingReactions} />
+    <PinnedMessage message={pinnedMessage} />
+
+    <!-- YouTube Player (hidden during pause/idle) -->
+    <div class="video-wrapper" class:hidden={playerMode !== 'playing_song'}>
+      <div id="yt-player"></div>
+    </div>
+
+    <!-- Pause Screen: Between songs -->
+    {#if playerMode === 'pause_screen'}
+      <div class="overlay pause-overlay">
+        <div class="pause-content">
+          {#if room.queue.length > 0}
+            <div class="up-next-label">UP NEXT</div>
+            <div class="next-singer">{room.queue[0]?.name}</div>
+            <div class="next-song">{room.queue[0]?.title}</div>
+            <div class="countdown">{countdown}</div>
+          {:else}
+            <div class="waiting-message">Queue empty</div>
+          {/if}
+        </div>
+
+        {#if room.queue.length > 1}
+          <div class="queue-preview">
+            <div class="queue-label">Coming up</div>
+            {#each room.queue.slice(1, 4) as entry, i (entry.id)}
+              <div class="queue-item">
+                <span class="queue-position">{i + 2}</span>
+                <span class="queue-name">{entry.name}</span>
+                <span class="queue-song">{entry.title}</span>
+              </div>
+            {/each}
+          </div>
+        {/if}
+
+        <div class="qr-section">
+          <img src={qrUrl} alt="Join queue" class="qr-code" />
+          <div class="qr-hint">Scan to add songs</div>
+        </div>
+      </div>
+    {/if}
+
+    <!-- Needs Interaction: Browser blocked autoplay -->
+    {#if playerMode === 'needs_interaction'}
+      <button class="overlay start-overlay" onclick={handleStartClick}>
+        <div class="start-content">
+          <div class="start-icon">▶</div>
+          <div class="start-title">Click to Start</div>
+          {#if room.nowPlaying}
+            <div class="start-song">{room.nowPlaying.title}</div>
+            <div class="start-singer">{room.nowPlaying.name}</div>
+          {/if}
+        </div>
+      </button>
+    {/if}
+
+    <!-- Idle Screen: No songs in queue -->
+    {#if playerMode === 'idle_screen'}
+      <div class="overlay idle-overlay">
+        <div class="idle-content">
         <div class="idle-title">Karaoke Night</div>
         <div class="idle-subtitle">{roomId || 'default'}</div>
         <img src={qrUrl} alt="Join queue" class="qr-code qr-large" />
@@ -923,6 +991,7 @@
       </div>
     </div>
   {/if}
+{/if}
 </div>
 
 <!-- Toast notifications -->

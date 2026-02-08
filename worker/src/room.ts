@@ -14,6 +14,7 @@ import {
   type Identity,
   type RoomConfig,
   type RoomMode,
+  type PlaybackDriver,
   type RoomAdmin,
   type AdminSession,
   type JoinResult,
@@ -31,6 +32,9 @@ import {
   type RoomClaimResult,
   type AdminVerifyResult,
   type SetConfigResult,
+  type PairPlayerResult,
+  type RevokePlayerResult,
+  type GetPlayerStatusResult,
   type SearchResult,
   type PlaybackState,
   type Reaction,
@@ -90,6 +94,10 @@ const CONFIG_KEY = 'config'
 const ADMIN_KEY = 'admin'
 const ADMIN_SESSIONS_KEY = 'admin_sessions'
 const USER_STACKS_KEY = 'user_stacks'
+const PLAYER_TOKEN_HASH_KEY = 'player_token_hash'
+const PLAYER_TOKEN_ISSUED_AT_KEY = 'player_token_issued_at'
+const PLAYER_LAST_SEEN_AT_KEY = 'player_last_seen_at'
+const PLAYER_CLIENT_VERSION_KEY = 'player_client_version'
 
 const DEFAULT_MAX_STACK_SIZE = 10
 const TIMERS_KEY = 'timers'
@@ -109,6 +117,14 @@ const PIN_CHAT_RATE_LIMIT_WINDOW_MS = 30 * 1000
 
 const REACTION_WINDOW_MS = 30 * 1000
 const PINNED_MESSAGE_TTL_MS = 8000
+
+async function hashPlayerToken(token: string): Promise<string> {
+  const data = new TextEncoder().encode(token)
+  const digest = await crypto.subtle.digest('SHA-256', data)
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('')
+}
 
 // Rate limits per minute
 const SEARCH_RATE_LIMIT = 20
@@ -151,6 +167,8 @@ interface SocketAttachment {
   acceptedClientType?: ClientType
   userId?: string
   displayName?: string
+  extensionAuthorized?: boolean
+  clientVersion?: string
 }
 
 // Persisted timer deadlines (replaces setTimeout for hibernation safety)
@@ -170,6 +188,11 @@ export class RoomDO implements DurableObject {
   private performances: Performance[] | null = null
   private roomConfig: RoomConfig | null = null
   private roomAdmin: RoomAdmin | null = null
+  private playerTokenHash: string | null = null
+  private playerTokenIssuedAt: number | null = null
+  private extensionLastSeenAt: number | null = null
+  private extensionClientVersion: string | null = null
+  private extensionStatusLoaded = false
   // User stacks for jukebox mode (persisted)
   private userStacks: Map<string, StackedSong[]> | null = null
   // Admin sessions (persisted to storage; cached in memory)
@@ -350,6 +373,145 @@ export class RoomDO implements DurableObject {
     return this.roomConfig?.maxStackSize ?? DEFAULT_MAX_STACK_SIZE
   }
 
+  private async getPlayerTokenHash(): Promise<string | null> {
+    if (this.playerTokenHash === null) {
+      this.playerTokenHash = await this.state.storage.get<string>(PLAYER_TOKEN_HASH_KEY) ?? null
+    }
+    return this.playerTokenHash
+  }
+
+  private generatePlayerToken(): string {
+    const bytes = new Uint8Array(32)
+    crypto.getRandomValues(bytes)
+    return Array.from(bytes)
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('')
+  }
+
+  private async setPlayerToken(token: string): Promise<void> {
+    const hash = await hashPlayerToken(token)
+    this.playerTokenHash = hash
+    this.playerTokenIssuedAt = Date.now()
+    await this.state.storage.put(PLAYER_TOKEN_HASH_KEY, hash)
+    await this.state.storage.put(PLAYER_TOKEN_ISSUED_AT_KEY, this.playerTokenIssuedAt)
+  }
+
+  private async clearPlayerToken(): Promise<void> {
+    this.playerTokenHash = null
+    this.playerTokenIssuedAt = null
+    await this.state.storage.delete(PLAYER_TOKEN_HASH_KEY)
+    await this.state.storage.delete(PLAYER_TOKEN_ISSUED_AT_KEY)
+  }
+
+  private async isValidPlayerToken(token: string | null): Promise<boolean> {
+    if (!token) return false
+    const stored = await this.getPlayerTokenHash()
+    if (!stored) return false
+    const hashed = await hashPlayerToken(token)
+    return hashed === stored
+  }
+
+  private async ensureExtensionStatusLoaded(): Promise<void> {
+    if (this.extensionStatusLoaded) return
+    const [lastSeenAt, clientVersion] = await Promise.all([
+      this.state.storage.get<number>(PLAYER_LAST_SEEN_AT_KEY),
+      this.state.storage.get<string>(PLAYER_CLIENT_VERSION_KEY),
+    ])
+    this.extensionLastSeenAt = lastSeenAt ?? null
+    this.extensionClientVersion = clientVersion ?? null
+    this.extensionStatusLoaded = true
+  }
+
+  private async persistExtensionStatus(): Promise<void> {
+    this.extensionStatusLoaded = true
+    if (this.extensionLastSeenAt === null) {
+      await this.state.storage.delete(PLAYER_LAST_SEEN_AT_KEY)
+    } else {
+      await this.state.storage.put(PLAYER_LAST_SEEN_AT_KEY, this.extensionLastSeenAt)
+    }
+    if (this.extensionClientVersion === null) {
+      await this.state.storage.delete(PLAYER_CLIENT_VERSION_KEY)
+    } else {
+      await this.state.storage.put(PLAYER_CLIENT_VERSION_KEY, this.extensionClientVersion)
+    }
+  }
+
+  private async markExtensionSeen(persist: boolean): Promise<void> {
+    if (persist && !this.extensionStatusLoaded) {
+      await this.ensureExtensionStatusLoaded()
+    }
+    this.extensionLastSeenAt = Date.now()
+    if (persist) {
+      await this.persistExtensionStatus()
+    }
+  }
+
+  private clearExtensionAuthorization(ws: WebSocket): void {
+    const attachment = this.getSocketAttachment(ws)
+    if (!attachment) return
+    attachment.extensionAuthorized = false
+    this.setSocketAttachment(ws, attachment)
+  }
+
+  private async authorizeExtensionSocket(ws: WebSocket, clientVersion?: string): Promise<void> {
+    if (!this.extensionStatusLoaded) {
+      await this.ensureExtensionStatusLoaded()
+    }
+
+    for (const other of Array.from(this.extensionSockets)) {
+      if (other === ws) continue
+      this.clearExtensionAuthorization(other)
+      this.extensionSockets.delete(other)
+      try {
+        other.close(4002, 'superseded')
+      } catch {
+        // Ignore close errors
+      }
+    }
+
+    this.extensionSockets.add(ws)
+    this.extensionClientVersion = clientVersion ?? null
+    await this.markExtensionSeen(true)
+  }
+
+  private isAuthorizedExtensionSocket(ws: WebSocket): boolean {
+    return this.socketClients.get(ws) === 'extension' && this.extensionSockets.has(ws)
+  }
+
+  private async shouldHandleExtensionPlaybackMessage(ws: WebSocket): Promise<boolean> {
+    if (!this.isAuthorizedExtensionSocket(ws)) return false
+    const config = await this.getRoomConfig()
+    const driver = config?.playbackDriver ?? 'iframe'
+    return driver === 'extension' || driver === 'auto'
+  }
+
+  private syncExtensionClientVersionFromSockets(): void {
+    if (this.extensionClientVersion) return
+    for (const ws of this.extensionSockets) {
+      const attachment = this.getSocketAttachment(ws)
+      if (attachment?.clientVersion) {
+        this.extensionClientVersion = attachment.clientVersion
+        return
+      }
+    }
+  }
+
+  private async disconnectAuthorizedExtensions(reason: string): Promise<void> {
+    for (const ws of Array.from(this.extensionSockets)) {
+      this.clearExtensionAuthorization(ws)
+      try {
+        ws.close(1000, reason)
+      } catch {
+        // Ignore close errors
+      }
+    }
+    if (this.extensionSockets.size > 0) {
+      this.extensionSockets.clear()
+      await this.markExtensionSeen(true)
+      this.broadcast({ kind: 'extensionStatus', connected: false })
+    }
+  }
+
   // =========================================================================
   // Room Config & Admin Methods
   // =========================================================================
@@ -360,8 +522,14 @@ export class RoomDO implements DurableObject {
     }
     if (this.roomConfig) {
       const merged = this.mergeSocialConfig(this.roomConfig)
-      if (!this.roomConfig.social || !this.isSocialConfigEqual(this.roomConfig.social, merged)) {
-        this.roomConfig = { ...this.roomConfig, social: merged }
+      const needsSocialMerge = !this.roomConfig.social || !this.isSocialConfigEqual(this.roomConfig.social, merged)
+      const needsPlaybackDriver = !this.roomConfig.playbackDriver
+      if (needsSocialMerge || needsPlaybackDriver) {
+        this.roomConfig = {
+          ...this.roomConfig,
+          social: merged,
+          playbackDriver: this.roomConfig.playbackDriver ?? 'iframe',
+        }
         await this.state.storage.put(CONFIG_KEY, this.roomConfig)
       }
     }
@@ -576,8 +744,11 @@ export class RoomDO implements DurableObject {
       if (attachment.clientType !== acceptedClientType) {
         this.clientTypeOverrides.add(ws)
       }
-      if (attachment.clientType === 'extension') {
+      if (attachment.clientType === 'extension' && attachment.extensionAuthorized) {
         this.extensionSockets.add(ws)
+        if (attachment.clientVersion) {
+          this.extensionClientVersion = attachment.clientVersion
+        }
       }
       if (attachment.userId && attachment.displayName) {
         this.socketIdentities.set(ws, {
@@ -586,6 +757,22 @@ export class RoomDO implements DurableObject {
         })
       }
     }
+
+    const authorizedExtensions = Array.from(this.extensionSockets)
+    if (authorizedExtensions.length > 1) {
+      const primary = authorizedExtensions[authorizedExtensions.length - 1]!
+      for (const socket of authorizedExtensions) {
+        if (socket === primary) continue
+        this.clearExtensionAuthorization(socket)
+        this.extensionSockets.delete(socket)
+        try {
+          socket.close(4002, 'superseded')
+        } catch {
+          // Ignore close errors
+        }
+      }
+    }
+
     this.mapsRebuilt = true
   }
 
@@ -655,9 +842,14 @@ export class RoomDO implements DurableObject {
   }
 
   private broadcast(message: ServerMessage, exclude?: WebSocket): void {
+    this.ensureMapsRebuilt()
     const data = JSON.stringify(message)
     for (const ws of this.getConnections()) {
       if (ws !== exclude && ws.readyState === WebSocket.OPEN) {
+        const clientType = this.socketClients.get(ws)
+        if (clientType === 'extension' && !this.extensionSockets.has(ws)) {
+          continue
+        }
         try {
           ws.send(data)
         } catch {
@@ -976,6 +1168,15 @@ export class RoomDO implements DurableObject {
       if (path === '/api/room/config' && request.method === 'POST') {
         return this.handleSetConfig(request)
       }
+      if (path === '/api/room/player/pair' && request.method === 'POST') {
+        return this.handlePairPlayer(request)
+      }
+      if (path === '/api/room/player/revoke' && request.method === 'POST') {
+        return this.handleRevokePlayer(request)
+      }
+      if (path === '/api/room/player/status' && request.method === 'GET') {
+        return this.handleGetPlayerStatus(request)
+      }
       if (path === '/api/admin/verify' && request.method === 'POST') {
         return this.handleAdminVerify(request)
       }
@@ -1021,6 +1222,9 @@ export class RoomDO implements DurableObject {
 
     // Build and serialize attachment (survives hibernation)
     const attachment: SocketAttachment = { clientType, acceptedClientType: clientType }
+    if (clientType === 'extension') {
+      attachment.extensionAuthorized = false
+    }
     if (identity) {
       attachment.userId = identity.userId
       attachment.displayName = identity.displayName
@@ -1030,9 +1234,6 @@ export class RoomDO implements DurableObject {
 
     // Update in-memory maps
     this.socketClients.set(server, clientType)
-    if (clientType === 'extension') {
-      this.extensionSockets.add(server)
-    }
 
     return new Response(null, { status: 101, webSocket: client })
   }
@@ -1053,6 +1254,9 @@ export class RoomDO implements DurableObject {
     this.ensureMapsRebuilt()
     // Check if this was an extension
     const wasExtension = this.extensionSockets.has(ws)
+    if (wasExtension) {
+      this.clearExtensionAuthorization(ws)
+    }
     this.extensionSockets.delete(ws)
     this.clientTypeOverrides.delete(ws)
     this.socketClients.delete(ws)
@@ -1061,6 +1265,7 @@ export class RoomDO implements DurableObject {
     // WebSocket is automatically removed from state.getWebSockets()
     // Notify clients if no extensions remain connected
     if (wasExtension && !this.hasExtensionConnected()) {
+      await this.markExtensionSeen(true)
       this.broadcast({ kind: 'extensionStatus', connected: false })
     }
   }
@@ -1068,11 +1273,19 @@ export class RoomDO implements DurableObject {
   async webSocketError(ws: WebSocket): Promise<void> {
     this.ensureMapsRebuilt()
     // Clean up Maps for the errored socket
+    const wasExtension = this.extensionSockets.has(ws)
+    if (wasExtension) {
+      this.clearExtensionAuthorization(ws)
+    }
     this.extensionSockets.delete(ws)
     this.clientTypeOverrides.delete(ws)
     this.socketClients.delete(ws)
     this.socketIdentities.delete(ws)
     // WebSocket is automatically removed from state.getWebSockets()
+    if (wasExtension && !this.hasExtensionConnected()) {
+      await this.markExtensionSeen(true)
+      this.broadcast({ kind: 'extensionStatus', connected: false })
+    }
   }
 
   /**
@@ -1121,14 +1334,31 @@ export class RoomDO implements DurableObject {
   }
 
   private async handleClientMessage(ws: WebSocket, msg: ClientMessage): Promise<void> {
+    if (msg.kind !== 'subscribe' && this.isAuthorizedExtensionSocket(ws)) {
+      await this.markExtensionSeen(msg.kind === 'ping')
+    }
+
     switch (msg.kind) {
       case 'subscribe': {
-        // Update in-memory maps
+        let extensionAuthorized = false
         if (msg.clientType === 'extension') {
-          this.extensionSockets.add(ws)
+          const valid = await this.isValidPlayerToken(msg.playerToken ?? null)
+          if (!valid) {
+            this.send(ws, { kind: 'error', message: 'Invalid player token' })
+            try {
+              ws.close(4001, 'unauthorized')
+            } catch {
+              // Ignore close errors
+            }
+            return
+          }
+          extensionAuthorized = true
+          await this.authorizeExtensionSocket(ws, msg.clientVersion)
         } else {
           this.extensionSockets.delete(ws)
         }
+
+        // Update in-memory maps
         this.socketClients.set(ws, msg.clientType)
 
         // Update attachment with declared client type (authoritative over URL param)
@@ -1139,12 +1369,18 @@ export class RoomDO implements DurableObject {
         const acceptedClientType = currentAttachment.acceptedClientType ?? currentAttachment.clientType
         currentAttachment.clientType = msg.clientType
         currentAttachment.acceptedClientType = acceptedClientType
+        currentAttachment.extensionAuthorized = extensionAuthorized
+        currentAttachment.clientVersion = msg.clientType === 'extension' ? msg.clientVersion : undefined
         this.setSocketAttachment(ws, currentAttachment)
 
         if (msg.clientType !== acceptedClientType) {
           this.clientTypeOverrides.add(ws)
         } else {
           this.clientTypeOverrides.delete(ws)
+        }
+
+        if (extensionAuthorized) {
+          this.send(ws, { kind: 'extensionAuthorized' })
         }
 
         const state = await this.getQueueState()
@@ -1160,7 +1396,7 @@ export class RoomDO implements DurableObject {
         }
 
         // If extension just connected, notify all other clients
-        if (msg.clientType === 'extension') {
+        if (extensionAuthorized) {
           this.broadcast({ kind: 'extensionStatus', connected: true }, ws)
         }
         break
@@ -1442,12 +1678,19 @@ export class RoomDO implements DurableObject {
       }
 
       case 'ended': {
+        if (!await this.shouldHandleExtensionPlaybackMessage(ws)) {
+          break
+        }
         // Extension reports video end - trigger queue advance
         const state = await this.getQueueState()
         const currentVideoId = state.nowPlaying?.videoId ?? null
+        const currentEntryId = state.nowPlaying?.id ?? null
 
-        // Only advance if video ID matches (idempotency)
-        if (currentVideoId === msg.videoId) {
+        const matchesEntry = msg.entryId ? currentEntryId === msg.entryId : false
+        const matchesVideo = !msg.entryId && currentVideoId === msg.videoId
+
+        // Only advance if entry matches (preferred) or video ID matches (fallback)
+        if (matchesEntry || matchesVideo) {
           await this.doAdvanceQueue(state, { kind: 'completed' })
         }
         // If mismatch, state broadcast will correct extension
@@ -1455,13 +1698,20 @@ export class RoomDO implements DurableObject {
       }
 
       case 'error': {
+        if (!await this.shouldHandleExtensionPlaybackMessage(ws)) {
+          break
+        }
         // Extension reports video error - log and advance to next
         console.log(`[RoomDO] Extension reported video error: ${msg.videoId} - ${msg.reason}`)
         const state = await this.getQueueState()
         const currentVideoId = state.nowPlaying?.videoId ?? null
+        const currentEntryId = state.nowPlaying?.id ?? null
 
-        // Only advance if video ID matches
-        if (currentVideoId === msg.videoId) {
+        const matchesEntry = msg.entryId ? currentEntryId === msg.entryId : false
+        const matchesVideo = !msg.entryId && currentVideoId === msg.videoId
+
+        // Only advance if entry matches (preferred) or video ID matches (fallback)
+        if (matchesEntry || matchesVideo) {
           await this.doAdvanceQueue(state, { kind: 'errored', reason: msg.reason })
         }
         break
@@ -2267,6 +2517,7 @@ export class RoomDO implements DurableObject {
       requireAuth: false,                  // Allow anonymous users
       maxStackSize: DEFAULT_MAX_STACK_SIZE,
       social: { ...DEFAULT_SOCIAL_CONFIG },
+      playbackDriver: 'iframe',
     }
 
     // Create admin
@@ -2350,12 +2601,17 @@ export class RoomDO implements DurableObject {
       return Response.json(result, { status: 404 })
     }
 
-    const body = (await request.json()) as { mode?: RoomMode; social?: Partial<SocialConfig> }
-    const { mode, social } = body
+    const body = (await request.json()) as {
+      mode?: RoomMode
+      social?: Partial<SocialConfig>
+      playbackDriver?: PlaybackDriver
+    }
+    const { mode, social, playbackDriver } = body
 
     const previousMode = config.mode
     let modeChanged = false
     let socialChanged = false
+    let playbackDriverChanged = false
 
     if (mode && mode !== config.mode) {
       config.mode = mode
@@ -2370,7 +2626,12 @@ export class RoomDO implements DurableObject {
       }
     }
 
-    if (modeChanged || socialChanged) {
+    if (playbackDriver && playbackDriver !== config.playbackDriver) {
+      config.playbackDriver = playbackDriver
+      playbackDriverChanged = true
+    }
+
+    if (modeChanged || socialChanged || playbackDriverChanged) {
       await this.saveRoomConfig(config)
 
       // Notify all clients of config change
@@ -2395,6 +2656,62 @@ export class RoomDO implements DurableObject {
     }
 
     const result: SetConfigResult = { kind: 'updated', config }
+    return Response.json(result)
+  }
+
+  private async handlePairPlayer(request: Request): Promise<Response> {
+    const isAdmin = await this.isAdminRequest(request)
+    if (!isAdmin) {
+      const result: PairPlayerResult = { kind: 'unauthorized' }
+      return Response.json(result, { status: 401 })
+    }
+
+    const token = this.generatePlayerToken()
+    await this.setPlayerToken(token)
+    await this.disconnectAuthorizedExtensions('Player token rotated')
+
+    const result: PairPlayerResult = { kind: 'paired', token }
+    return Response.json(result)
+  }
+
+  private async handleRevokePlayer(request: Request): Promise<Response> {
+    const isAdmin = await this.isAdminRequest(request)
+    if (!isAdmin) {
+      const result: RevokePlayerResult = { kind: 'unauthorized' }
+      return Response.json(result, { status: 401 })
+    }
+
+    await this.clearPlayerToken()
+    await this.disconnectAuthorizedExtensions('Player token revoked')
+
+    const result: RevokePlayerResult = { kind: 'revoked' }
+    return Response.json(result)
+  }
+
+  private async handleGetPlayerStatus(request: Request): Promise<Response> {
+    const isAdmin = await this.isAdminRequest(request)
+    if (!isAdmin) {
+      const result: GetPlayerStatusResult = { kind: 'unauthorized' }
+      return Response.json(result, { status: 401 })
+    }
+
+    await this.ensureExtensionStatusLoaded()
+    const config = await this.getRoomConfig()
+    const connected = this.hasExtensionConnected()
+    this.syncExtensionClientVersionFromSockets()
+    if (connected && this.extensionLastSeenAt === null) {
+      this.extensionLastSeenAt = Date.now()
+    }
+
+    const result: GetPlayerStatusResult = {
+      kind: 'status',
+      status: {
+        connected,
+        playbackDriver: config?.playbackDriver ?? 'iframe',
+        lastSeenAt: this.extensionLastSeenAt,
+        clientVersion: this.extensionClientVersion,
+      },
+    }
     return Response.json(result)
   }
 
